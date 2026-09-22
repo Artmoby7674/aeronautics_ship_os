@@ -17,7 +17,7 @@ local C = {
     bad      = colors.red,
     accent   = colors.cyan,
     bar      = colors.blue,
-    barempty = colors.darkGray,
+    barempty = colors.lightGray,
     panel    = colors.black,
 }
 
