@@ -1,12 +1,83 @@
 -- ArtCorpOS - Startup
--- Runs on computer boot, guides user through peripheral naming
+-- Setup wizard: connect peripherals one at a time, auto-detect and assign
 
 local version = "1.0"
 local configDir = "config"
 local libDir = "lib"
 
 -- ============================================================
--- Boot sequence
+-- Helpers
+-- ============================================================
+
+local function scanNetwork()
+    local found = {}
+    local modem = peripheral.find("modem", function(name, m)
+        return not m.isWireless()
+    end)
+    if modem then
+        local names = modem.getNamesRemote()
+        for _, name in ipairs(names) do
+            local devType = modem.getTypeRemote(name)
+            table.insert(found, { name = name, type = devType, via = "wired" })
+        end
+    end
+    local wireless = peripheral.find("modem", function(name, m)
+        return m.isWireless()
+    end)
+    if wireless then
+        for _, ptype in ipairs({"monitor", "speaker"}) do
+            local dev = peripheral.find(ptype)
+            if dev then
+                local wname = peripheral.getName(dev)
+                if wname then
+                    local already = false
+                    for _, f in ipairs(found) do
+                        if f.name == wname then already = true break end
+                    end
+                    if not already then
+                        table.insert(found, { name = wname, type = ptype, via = "wireless" })
+                    end
+                end
+            end
+        end
+    end
+    return found
+end
+
+local function diffDevices(before, after)
+    local before_names = {}
+    for _, d in ipairs(before) do before_names[d.name] = true end
+    local new = {}
+    for _, d in ipairs(after) do
+        if not before_names[d.name] then
+            table.insert(new, d)
+        end
+    end
+    return new
+end
+
+local function waitForNewDevice(before)
+    while true do
+        os.pullEvent("key")
+        local after = scanNetwork()
+        local new = diffDevices(before, after)
+        if #new > 0 then
+            return new[1]
+        end
+        print("  No new device detected. Make sure the modem is")
+        print("  placed adjacent to the computer and right-clicked.")
+        print("  Press any key to try again.")
+    end
+end
+
+local function promptContinue(msg)
+    print(msg)
+    print("  Press any key when ready...")
+    os.pullEvent("key")
+end
+
+-- ============================================================
+-- Boot
 -- ============================================================
 
 term.clear()
@@ -79,67 +150,117 @@ print("  Hardware library loaded")
 print("")
 
 -- ============================================================
--- Step 3: Peripheral naming guide
+-- Step 3: Setup wizard
 -- ============================================================
 
-print("[3/4] Peripheral setup")
-print("  The following peripherals are required.")
-print("  Use the 'rename' command to name each one.")
-print("")
-print("  In the CC terminal, type:")
-print("    rename <peripheral_name> <required_name>")
-print("")
-print("  Example: rename modem_0 wired_modem")
+print("[3/4] Peripheral setup wizard")
+print("  This will guide you through connecting each peripheral.")
+print("  Connect one device at a time when prompted.")
 print("")
 
--- Build list of required peripherals from config
-local required = {}
-for key, name in pairs(config.peripherals) do
-    if name and name ~= "" then
-        local desc = key
-        if key == "input_1" then desc = "input_1 - Typewriter relay (WASD)"
-        elseif key == "input_2" then desc = "input_2 - Typewriter relay (Q/E)"
-        elseif key == "output_FL" then desc = "output_FL - Front-left propeller"
-        elseif key == "output_FR" then desc = "output_FR - Front-right propeller"
-        elseif key == "output_RL" then desc = "output_RL - Rear-left propeller"
-        elseif key == "output_RR" then desc = "output_RR - Rear-right propeller"
-        elseif key == "output_REAR" then desc = "output_REAR - Rear thrusters"
-        elseif key == "main_monitor" then desc = "main_monitor - HUD display"
-        elseif key == "speaker" then desc = "speaker - Audio alerts"
+-- Check for saved assignments
+local assignments_file = configDir .. "/assignments_" .. selected_config .. ".lua"
+local assignments = {}
+local has_saved = false
+if fs.exists(assignments_file) then
+    local aok, asaved = pcall(function()
+        local fn = loadfile(assignments_file)
+        if fn then return fn() end
+    end)
+    if aok and asaved and type(asaved) == "table" then
+        assignments = asaved
+        has_saved = true
+    end
+end
+
+if has_saved then
+    print("  Found saved assignments from previous session:")
+    for key, name in pairs(assignments) do
+        print("    " .. key .. " -> " .. name)
+    end
+    print("")
+    write("  Use saved assignments? [Y/n] ")
+    local answer = read()
+    if answer == "" or answer:lower() == "y" then
+        print("  Using saved assignments.")
+    else
+        has_saved = false
+        assignments = {}
+        print("  Starting fresh setup.")
+    end
+    print("")
+end
+
+if not has_saved then
+    -- Build list of required peripherals from config
+    local required = {}
+    for key, name in pairs(config.peripherals) do
+        if name and name ~= "" then
+            local desc = ""
+            if key == "input_1" then desc = "Typewriter relay for WASD keys"
+            elseif key == "input_2" then desc = "Typewriter relay for Q/E keys"
+            elseif key == "output_FL" then desc = "Front-left propeller relay"
+            elseif key == "output_FR" then desc = "Front-right propeller relay"
+            elseif key == "output_RL" then desc = "Rear-left propeller relay"
+            elseif key == "output_RR" then desc = "Rear-right propeller relay"
+            elseif key == "output_REAR" then desc = "Rear thruster relay"
+            elseif key == "main_monitor" then desc = "HUD display monitor"
+            elseif key == "speaker" then desc = "Audio speaker"
+            else desc = key
+            end
+            table.insert(required, { key = key, target = name, desc = desc })
         end
-        table.insert(required, { key = key, name = name, desc = desc })
+    end
+
+    -- Sort: inputs first, then outputs, then optional
+    local order = { input_1 = 1, input_2 = 2, output_FL = 3, output_FR = 4,
+                    output_RL = 5, output_RR = 6, output_REAR = 7,
+                    main_monitor = 8, speaker = 9 }
+    table.sort(required, function(a, b)
+        return (order[a.key] or 99) < (order[b.key] or 99)
+    end)
+
+    -- Scan baseline
+    print("  Scanning current network...")
+    local baseline = scanNetwork()
+    print("  Found " .. #baseline .. " device(s) already connected.")
+    print("")
+
+    for i, req in ipairs(required) do
+        print("  [" .. i .. "/" .. #required .. "] Connect: " .. req.desc)
+        print("            Target name: " .. req.target)
+        print("")
+        promptContinue("  Connect the device's modem to the network cable, then right-click it.")
+
+        local new_dev = waitForNewDevice(baseline)
+        assignments[req.key] = new_dev.name
+        print("  -> Detected: " .. new_dev.name .. " (" .. new_dev.type .. ")")
+        print("  -> Assigned: " .. req.key)
+        print("")
+
+        -- Update baseline so next scan doesn't re-detect this one
+        table.insert(baseline, new_dev)
+    end
+
+    -- Save assignments
+    local save_fn = io.open(assignments_file, "w")
+    if save_fn then
+        save_fn:write("return {\n")
+        for key, name in pairs(assignments) do
+            save_fn:write('  [' .. string.format("%q", key) .. '] = ' .. string.format("%q", name) .. ',\n')
+        end
+        save_fn:write("}\n")
+        save_fn:close()
+        print("  Assignments saved to " .. assignments_file)
     end
 end
 
-table.sort(required, function(a, b) return a.key < b.key end)
-
-print("  Required peripherals:")
-print("  ----------------------------------------")
-for _, r in ipairs(required) do
-    print("    rename <source> " .. r.name)
-    print("      -> " .. r.desc)
+-- Apply assignments to config
+for key, name in pairs(assignments) do
+    config.peripherals[key] = name
 end
-print("  ----------------------------------------")
-print("")
 
--- Scan network to show available devices
-print("  Scanning network for available devices...")
-local found, err = Hardware.scan()
-if found then
-    print("  Found " .. #found .. " devices:")
-    for _, dev in ipairs(found) do
-        local via = dev.via and (" [" .. dev.via .. "]") or ""
-        print("    " .. dev.name .. " (" .. dev.type .. ")" .. via)
-    end
-else
-    print("  WARNING: " .. tostring(err))
-end
 print("")
-
-print("  Rename your devices now, then press any key to continue.")
-print("  (You can skip devices you don't have - they'll be reported as missing)")
-print("")
-os.pullEvent("key")
 
 -- ============================================================
 -- Step 4: Connect to peripherals
@@ -155,7 +276,7 @@ if #missing > 0 then
         print("    - " .. name)
     end
     print("  These functions will not be available.")
-    print("  You can rename them later and restart the OS.")
+    print("  Re-run setup to connect them.")
 end
 
 print("")
