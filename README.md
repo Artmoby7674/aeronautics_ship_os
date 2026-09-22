@@ -14,7 +14,7 @@ A ComputerCraft flight stabilization and control system for Create:Aeronautics s
 In a ComputerCraft terminal:
 
 ```
-wget run https://raw.githubusercontent.com/TechTistic/aeronautics_os/main/install.lua
+wget run https://raw.githubusercontent.com/Artmoby7674/aeronautics_ship_os/master/install.lua
 ```
 
 Then run:

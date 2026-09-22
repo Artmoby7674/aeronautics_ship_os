@@ -4,7 +4,7 @@
 --
 -- After install, run: startup
 
-local BASE_URL = "https://raw.githubusercontent.com/TechTistic/aeronautics_os/main"
+local BASE_URL = "https://raw.githubusercontent.com/Artmoby7674/aeronautics_ship_os/master"
 
 local files = {
     "startup",
