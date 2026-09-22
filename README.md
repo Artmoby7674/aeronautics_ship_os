@@ -1,13 +1,12 @@
 # ArtCorpOS
 
-A ComputerCraft flight stabilization and control system for Create:Aeronautics ships.
+A ComputerCraft flight stabilization and control system for my Create:Aeronautics ships.
 
 ## Requirements
 
-- Minecraft with Create:Aeronautics mod
-- ComputerCraft (CC:Tweaked)
-- CC:Sable addon (for ship physics data)
-- Wired modems + networking cable
+- Minecraft with the Create:Aeronautics mod
+- CC:Tweaked
+- CC:Sable addon
 
 ## Quick Install
 
