@@ -21,7 +21,7 @@ return {
         output_REAR = "relay_7", -- Rear thrusters: fw=front, bw=back
 
         -- Monitors
-        -- main_monitor = "monitor_0",
+        main_monitor = "main_monitor",
 
         -- Speaker
         -- speaker = "speaker_0",
