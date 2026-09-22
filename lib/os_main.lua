@@ -76,6 +76,11 @@ function OS.mainLoop(controlTimer)
         end
 
         if now - last_hud_update >= hud_interval then
+            if not OS._tick_count then OS._tick_count = 0 end
+            OS._tick_count = OS._tick_count + 1
+            if OS._tick_count <= 3 then
+                print("[HUD] tick #" .. OS._tick_count .. " event=" .. event)
+            end
             OS.updateHUD()
             last_hud_update = now
         end
@@ -166,14 +171,20 @@ function OS.handlePeripheralDisconnect(name)
 end
 
 function OS.updateHUD()
-    local mon = hw.getDevice("main_monitor")
-    if not mon then
-        if not OS._hud_warned then
-            print("[HUD] No monitor device found (main_monitor)")
-            OS._hud_warned = true
+    if not OS._hud_debug then
+        OS._hud_debug = true
+        print("[HUD] updateHUD called")
+        local mon = hw.getDevice("main_monitor")
+        print("[HUD] main_monitor device: " .. tostring(mon ~= nil))
+        if mon then
+            print("[HUD] device type: " .. tostring(type(mon)))
+            local ok, w, h = pcall(function() return mon.getSize() end)
+            print("[HUD] getSize: " .. tostring(ok) .. " " .. tostring(w) .. "x" .. tostring(h))
         end
-        return
     end
+
+    local mon = hw.getDevice("main_monitor")
+    if not mon then return end
 
     local ok, err = pcall(function()
         local status = flight:getStatus()
