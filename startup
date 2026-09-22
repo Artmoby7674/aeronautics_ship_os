@@ -1,0 +1,257 @@
+-- ArtCorpOS - Startup
+-- Runs on computer boot, scans hardware, assigns names
+
+local version = "1.0"
+local configDir = "config"
+local libDir = "lib"
+
+-- ============================================================
+-- Boot sequence
+-- ============================================================
+
+term.clear()
+term.setCursorPos(1, 1)
+
+print("========================================")
+print("      ARTCORPOS v" .. version)
+print("   Flight Stabilization System")
+print("========================================")
+print("")
+print("Initializing...")
+print("")
+
+-- ============================================================
+-- Step 1: Load config
+-- ============================================================
+
+print("[1/5] Loading configuration...")
+
+-- List available configs
+local configs = {}
+local configFiles = fs.list(configDir)
+for _, file in ipairs(configFiles) do
+    if file:match("%.lua$") then
+        table.insert(configs, (file:gsub("%.lua$", "")))
+    end
+end
+
+if #configs == 0 then
+    print("  ERROR: No config files found in " .. configDir .. "/")
+    print("  Please create a config file first.")
+    return
+end
+
+-- Select config
+local selected_config = nil
+if #configs == 1 then
+    selected_config = configs[1]
+    print("  Found config: " .. selected_config)
+else
+    print("  Available configs:")
+    for i, name in ipairs(configs) do
+        print("    " .. i .. ") " .. name)
+    end
+    write("  Select config (1-" .. #configs .. "): ")
+    local choice = read()
+    local idx = tonumber(choice)
+    if idx and idx >= 1 and idx <= #configs then
+        selected_config = configs[idx]
+    else
+        print("  Invalid selection.")
+        return
+    end
+end
+
+-- Load config
+local config_path = configDir .. "." .. selected_config
+local ok, config = pcall(require, config_path)
+if not ok then
+    print("  ERROR: Failed to load config: " .. tostring(config))
+    return
+end
+print("  Config loaded: " .. config.name .. " v" .. (config.version or "unknown"))
+print("")
+
+-- ============================================================
+-- Step 2: Load hardware library
+-- ============================================================
+
+print("[2/5] Loading hardware library...")
+local Hardware = require(libDir .. ".hardware")
+Hardware.init(config)
+print("  Hardware library loaded")
+print("")
+
+-- ============================================================
+-- Step 3: Scan wired network
+-- ============================================================
+
+print("[3/5] Scanning wired network...")
+local found, err = Hardware.scan()
+
+if not found then
+    print("  ERROR: " .. tostring(err))
+    print("  Make sure a wired modem is attached to the computer.")
+    return
+end
+
+print("  Found " .. #found .. " devices on network:")
+for i, dev in ipairs(found) do
+    local via = dev.via and (" [" .. dev.via .. "]") or ""
+    print("    " .. i .. ". " .. dev.name .. " (" .. dev.type .. ")" .. via)
+end
+print("")
+
+-- ============================================================
+-- Step 4: Assign names to devices
+-- ============================================================
+
+print("[4/5] Device name assignment")
+print("  Map each discovered device to its function in the ship.")
+print("  Press Enter to skip a device (can assign later).")
+print("")
+
+-- Build list of expected device keys
+local expected_keys = {}
+for key, _ in pairs(config.peripherals) do
+    table.insert(expected_keys, key)
+end
+table.sort(expected_keys)
+
+-- Check for saved assignments
+local assignments_file = configDir .. "/assignments_" .. selected_config .. ".lua"
+local saved_assignments = {}
+if fs.exists(assignments_file) then
+    local aok, asaved = pcall(function()
+        local fn = loadfile(assignments_file)
+        if fn then return fn() end
+    end)
+    if aok and asaved then
+        saved_assignments = asaved
+        print("  Loaded saved assignments from previous session.")
+    end
+end
+
+-- Show assignment table
+local assignments = {}
+local available_devices = {}
+
+-- Start with saved assignments
+for key, name in pairs(saved_assignments) do
+    assignments[key] = name
+end
+
+-- Show what needs assignment
+local needs_assignment = {}
+for _, key in ipairs(expected_keys) do
+    if not assignments[key] then
+        table.insert(needs_assignment, key)
+    end
+end
+
+if #needs_assignment == 0 then
+    print("  All devices already assigned:")
+    for key, name in pairs(assignments) do
+        print("    " .. key .. " -> " .. name)
+    end
+else
+    print("  Device functions to assign:")
+    print("  (Enter the network name for each function)")
+    print("")
+
+    for _, key in ipairs(needs_assignment) do
+        -- Describe what this key does
+        local desc = ""
+        if key == "input_1" then
+            desc = "Typewriter input relay (WASD keys)"
+        elseif key == "input_2" then
+            desc = "Typewriter input relay (Q/E keys)"
+        elseif key == "output_FL" then
+            desc = "Front-left propeller relay"
+        elseif key == "output_FR" then
+            desc = "Front-right propeller relay"
+        elseif key == "output_RL" then
+            desc = "Rear-left propeller relay"
+        elseif key == "output_RR" then
+            desc = "Rear-right propeller relay"
+        elseif key == "output_REAR" then
+            desc = "Rear thruster relay"
+        elseif key == "main_monitor" then
+            desc = "Main display monitor"
+        elseif key == "speaker" then
+            desc = "Audio speaker"
+        else
+            desc = key
+        end
+
+        -- Show available devices
+        write("  " .. key .. " (" .. desc .. ") = ")
+        local input = read()
+        if input and input ~= "" then
+            assignments[key] = input
+            print("    -> Assigned to: " .. input)
+        else
+            print("    -> Skipped")
+        end
+    end
+end
+
+-- Save assignments
+local save_fn = io.open(assignments_file, "w")
+if save_fn then
+    save_fn:write("return {\n")
+    for key, name in pairs(assignments) do
+        save_fn:write('  [' .. string.format("%q", key) .. '] = ' .. string.format("%q", name) .. ',\n')
+    end
+    save_fn:write("}\n")
+    save_fn:close()
+    print("")
+    print("  Assignments saved to " .. assignments_file)
+end
+
+-- Apply assignments to config
+for key, name in pairs(assignments) do
+    config.peripherals[key] = name
+end
+
+print("")
+
+-- ============================================================
+-- Step 5: Connect to peripherals
+-- ============================================================
+
+print("[5/5] Connecting to peripherals...")
+local connected, missing = Hardware.connect()
+
+if #missing > 0 then
+    print("")
+    print("  WARNING: Missing peripherals:")
+    for _, name in ipairs(missing) do
+        print("    - " .. name)
+    end
+    print("  These functions will not be available.")
+end
+
+print("")
+print("========================================")
+print("  Hardware scan complete!")
+print("  Press any key to start the OS...")
+print("========================================")
+os.pullEvent("key")
+
+-- ============================================================
+-- Launch main OS
+-- ============================================================
+
+term.clear()
+term.setCursorPos(1, 1)
+print("Starting ArtCorpOS...")
+print("")
+
+-- Set up package path for require
+if not package.path:match("lib/%?%.lua") then
+    package.path = "lib/?.lua;" .. package.path
+end
+
+local os_main = require(libDir .. ".os_main")
+os_main.start(config, Hardware)
