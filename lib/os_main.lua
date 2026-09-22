@@ -228,6 +228,4 @@ function OS.shutdown()
     print("ArtCorpOS shutdown.")
 end
 
-os.atExit(function() OS.shutdown() end)
-
 return OS
