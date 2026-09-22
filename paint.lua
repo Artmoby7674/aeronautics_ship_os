@@ -1,5 +1,5 @@
 -- ArtCorpOS - Monitor Painter
--- Design your HUD layout on the monitor
+-- Draw on the cockpit monitor from the computer terminal
 -- Run: paint
 
 local SCALE = 0.5
@@ -30,20 +30,15 @@ local brush = colors.cyan
 local brush_idx = 4
 local mon = nil
 local pixels = {}
-local show_help = false
-
--- Grid character for drawing
-local GRID_CHAR = string.char(219)
+local show_controls = false
+local last_cursor = { x = 0, y = 0 }
 
 local function findMonitor()
-    -- Try wired first
     local m = peripheral.find("monitor", function(name, dev)
         local w, h = dev.getSize()
         return w >= MON_W and h >= MON_H
     end)
     if m then return m end
-
-    -- Try any monitor
     return peripheral.find("monitor")
 end
 
@@ -54,14 +49,11 @@ local function init()
         print("Connect a monitor via wired modem.")
         return false
     end
-
     pcall(function() mon.setTextScale(SCALE) end)
     MON_W, MON_H = mon.getSize()
-
     mon.setBackgroundColor(colors.black)
     mon.clear()
 
-    -- Load existing pixels if any
     if fs.exists("paint_data") then
         local f = fs.open("paint_data", "r")
         if f then
@@ -72,7 +64,6 @@ local function init()
             end
         end
     end
-
     return true
 end
 
@@ -80,7 +71,7 @@ local function drawPixel(x, y, color)
     if x < 1 or x > MON_W or y < 1 or y > MON_H then return end
     mon.setBackgroundColor(color)
     mon.setCursorPos(x, y)
-    mon.write(GRID_CHAR)
+    mon.write(string.char(219))
     mon.setBackgroundColor(colors.black)
     pixels[x .. "," .. y] = color
 end
@@ -99,25 +90,20 @@ local function redrawAll()
     for key, color in pairs(pixels) do
         local x, y = key:match("^(%-?%d+),(%-?%d+)$")
         x, y = tonumber(x), tonumber(y)
-        if x and y then
-            drawPixel(x, y, color)
-        end
+        if x and y then drawPixel(x, y, color) end
     end
 end
 
-local function drawCursor()
-    -- Flash cursor
-    local current = pixels[cursor_x .. "," .. cursor_y]
-    local c = current or colors.black
-    -- Invert for visibility
-    mon.setTextColor(colors.white)
-    mon.setBackgroundColor(colors.black)
+local function drawMonitorCursor()
+    mon.setBackgroundColor(colors.white)
+    mon.setTextColor(colors.black)
     mon.setCursorPos(cursor_x, cursor_y)
-    mon.write("+")
+    mon.write(string.char(219))
+    mon.setBackgroundColor(colors.black)
+    mon.setTextColor(colors.white)
 end
 
-local function drawHUD()
-    -- Info bar at top of terminal
+local function drawTerminal()
     term.setBackgroundColor(colors.black)
     term.clear()
     term.setCursorPos(1, 1)
@@ -125,35 +111,53 @@ local function drawHUD()
     term.setTextColor(colors.cyan)
     print("=== MONITOR PAINTER ===")
     print("")
-    term.setTextColor(colors.white)
-    print("Monitor: " .. MON_W .. "x" .. MON_H .. " chars")
-    print("Cursor: " .. cursor_x .. "," .. cursor_y)
 
-    local cidx = colors_list[brush_idx]
-    term.setTextColor(brush)
-    print("Brush: " .. (cidx and cidx.name or "?"))
     term.setTextColor(colors.white)
-    print("Pixels: " .. #pixels)
+    term.write("Monitor: ")
+    term.setTextColor(colors.lightBlue)
+    print(MON_W .. "x" .. MON_H)
+
+    term.setTextColor(colors.white)
+    term.write("Cursor:  ")
+    term.setTextColor(colors.lightBlue)
+    print(cursor_x .. "," .. cursor_y)
+
+    term.setTextColor(colors.white)
+    term.write("Brush:   ")
+    term.setTextColor(brush)
+    local cidx = colors_list[brush_idx]
+    print(cidx and cidx.name or "?")
+
+    term.setTextColor(colors.white)
+    term.write("Pixels:  ")
+    term.setTextColor(colors.lightBlue)
+    local count = 0
+    for _ in pairs(pixels) do count = count + 1 end
+    print(count)
 
     print("")
-    term.setTextColor(colors.lightBlue)
-    print("CONTROLS:")
-    print("  Arrows/WASD - Move cursor")
-    print("  Space       - Paint pixel")
-    print("  Backspace   - Erase pixel")
-    print("  1-9,0       - Select color")
-    print("  [/]         - Prev/Next color")
-    print("  L           - Fill line (hold)")
-    print("  R           - Fill rect (hold)")
-    print("  C           - Clear all")
-    print("  S           - Save")
-    print("  H           - Toggle help")
-    print("  Q           - Quit")
+    term.setTextColor(colors.gray)
+    print("Arrows/WASD Move  Space Paint")
+    print("Backspace    Erase X     Help")
 
-    if show_help then
+    if show_controls then
         print("")
-        term.setTextColor(colors.yellow)
-        print("COLORS:")
+        term.setTextColor(colors.cyan)
+        print("--- CONTROLS ---")
+        term.setTextColor(colors.white)
+        print("  Arrows/WASD  Move cursor")
+        print("  Space        Paint pixel")
+        print("  Backspace    Erase pixel")
+        print("  1-9,0        Select color")
+        print("  [ / ]        Cycle colors")
+        print("  L            Fill line right")
+        print("  R            Fill rect to cursor")
+        print("  C            Clear all")
+        print("  S            Save")
+        print("  Q            Quit")
+        print("")
+        term.setTextColor(colors.cyan)
+        print("--- COLORS ---")
         for i, c in ipairs(colors_list) do
             local key = i <= 9 and tostring(i) or "0"
             term.setTextColor(c.val)
@@ -169,7 +173,6 @@ local function saveData()
     if f then
         f.write(textutils.serialise(pixels))
         f.close()
-        print("Saved!")
     end
 end
 
@@ -177,7 +180,6 @@ local function clearAll()
     pixels = {}
     mon.setBackgroundColor(colors.black)
     mon.clear()
-    print("Cleared!")
 end
 
 -- ============================================================
@@ -185,12 +187,8 @@ end
 -- ============================================================
 
 if not init() then return end
-
 redrawAll()
-drawCursor()
-drawHUD()
-
-local fill_start = nil
+drawTerminal()
 
 while true do
     local event, key = os.pullEvent("key")
@@ -203,32 +201,28 @@ while true do
         print("Painter closed.")
         return
 
+    elseif key == keys.x then
+        show_controls = not show_controls
+
     elseif key == keys.left or key == keys.a then
         cursor_x = math.max(1, cursor_x - 1)
-
     elseif key == keys.right or key == keys.d then
         cursor_x = math.min(MON_W, cursor_x + 1)
-
     elseif key == keys.up or key == keys.w then
         cursor_y = math.max(1, cursor_y - 1)
-
     elseif key == keys.down or key == keys.s then
         cursor_y = math.min(MON_H, cursor_y + 1)
 
     elseif key == keys.space then
         drawPixel(cursor_x, cursor_y, brush)
-
     elseif key == keys.backspace then
         clearPixel(cursor_x, cursor_y)
 
     elseif key == keys.l then
-        -- Fill horizontal line from cursor to edge
         for x = cursor_x, MON_W do
             drawPixel(x, cursor_y, brush)
         end
-
     elseif key == keys.r then
-        -- Fill rectangle from 1,1 to cursor
         local x1, y1 = 1, 1
         local x2, y2 = cursor_x, cursor_y
         if x1 > x2 then x1, x2 = x2, x1 end
@@ -241,25 +235,18 @@ while true do
 
     elseif key == keys.c then
         clearAll()
-
     elseif key == keys.s then
         saveData()
-
-    elseif key == keys.h then
-        show_help = not show_help
 
     elseif key == keys.leftBracket then
         brush_idx = brush_idx - 1
         if brush_idx < 1 then brush_idx = #colors_list end
         brush = colors_list[brush_idx].val
-
     elseif key == keys.rightBracket then
         brush_idx = brush_idx + 1
         if brush_idx > #colors_list then brush_idx = 1 end
         brush = colors_list[brush_idx].val
-
     else
-        -- Number keys 1-9
         for i = 1, 9 do
             if key == keys[i] then
                 brush_idx = i
@@ -273,7 +260,6 @@ while true do
         end
     end
 
-    redrawAll()
-    drawCursor()
-    drawHUD()
+    drawTerminal()
+    drawMonitorCursor()
 end
