@@ -168,11 +168,6 @@ print("")
 -- Step 3: Setup wizard
 -- ============================================================
 
-print("[3/5] Peripheral setup wizard")
-print("  This will guide you through connecting each peripheral.")
-print("  Connect one device at a time when prompted.")
-print("")
-
 -- Check for saved assignments
 local assignments_file = configDir .. "/assignments_" .. selected_config .. ".lua"
 local assignments = {}
@@ -189,24 +184,17 @@ if fs.exists(assignments_file) then
 end
 
 if has_saved then
-    print("  Found saved assignments from previous session:")
+    print("[3/5] Using saved peripheral assignments")
     for key, name in pairs(assignments) do
-        print("    " .. key .. " -> " .. name)
+        print("  " .. key .. " -> " .. name)
     end
     print("")
-    write("  Use saved assignments? [Y/n] ")
-    local answer = read()
-    if answer == "" or answer:lower() == "y" then
-        print("  Using saved assignments.")
-    else
-        has_saved = false
-        assignments = {}
-        print("  Starting fresh setup.")
-    end
+else
+    print("[3/5] Peripheral setup wizard")
+    print("  This will guide you through connecting each peripheral.")
+    print("  Connect one device at a time when prompted.")
     print("")
-end
 
-if not has_saved then
     -- Build list of required peripherals from config
     local required = {}
     for key, name in pairs(config.peripherals) do

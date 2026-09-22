@@ -167,11 +167,22 @@ end
 
 function OS.updateHUD()
     local mon = hw.getDevice("main_monitor")
-    if not mon then return end
+    if not mon then
+        if not OS._hud_warned then
+            print("[HUD] No monitor device found (main_monitor)")
+            OS._hud_warned = true
+        end
+        return
+    end
 
-    local status = flight:getStatus()
-    local hud = require("lib.hud")
-    hud.render(mon, status, config, status_message)
+    local ok, err = pcall(function()
+        local status = flight:getStatus()
+        local hud = require("lib.hud")
+        hud.render(mon, status, config, status_message)
+    end)
+    if not ok then
+        print("[HUD ERROR] " .. tostring(err))
+    end
 end
 
 function OS.displayStatus()
