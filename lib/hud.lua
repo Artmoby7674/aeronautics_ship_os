@@ -1,7 +1,7 @@
 local HUD = {}
 
--- 3x2 monitor at scale 0.5 = 57x26 chars
-local MON_W, MON_H = 57, 26
+-- 3x2 monitor at scale 0.5 = 57x24 chars
+local MON_W, MON_H = 57, 24
 local SCALE = 0.5
 
 -- Colors
@@ -17,11 +17,11 @@ local C_WARN    = colors.yellow
 local C_BAD     = colors.red
 local C_ACCENT  = colors.cyan
 
--- Layout: 1-char border, content fills 57x26
+-- Layout: 1-char border, content fills 57x24
 -- Left panel: cols 2-40 (39 chars)
 -- Stripe: cols 41-42 (2 chars)
 -- Right panel: cols 43-56 (14 chars)
--- Rows 2-25 (24 rows)
+-- Rows 2-23 (22 rows)
 local LP_X, LP_W = 2, 39
 local ST_X, ST_W = 41, 2
 local RP_X, RP_W = 43, 14
