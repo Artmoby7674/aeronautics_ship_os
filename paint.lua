@@ -1,5 +1,5 @@
 -- ArtCorpOS - Monitor Painter
--- Draw on the cockpit monitor from the computer terminal
+-- Draw on cockpit monitor from the computer terminal
 -- Run: paint
 
 local SCALE = 0.5
@@ -30,13 +30,13 @@ local brush = colors.cyan
 local brush_idx = 4
 local mon = nil
 local pixels = {}
-local show_controls = false
-local last_cursor = { x = 0, y = 0 }
+local show_help = false
+local term_w, term_h = 0, 0
 
 local function findMonitor()
     local m = peripheral.find("monitor", function(name, dev)
         local w, h = dev.getSize()
-        return w >= MON_W and h >= MON_H
+        return w >= 24 and h >= 10
     end)
     if m then return m end
     return peripheral.find("monitor")
@@ -46,13 +46,18 @@ local function init()
     mon = findMonitor()
     if not mon then
         print("ERROR: No monitor found!")
-        print("Connect a monitor via wired modem.")
         return false
     end
     pcall(function() mon.setTextScale(SCALE) end)
     MON_W, MON_H = mon.getSize()
     mon.setBackgroundColor(colors.black)
     mon.clear()
+
+    -- Try to set terminal to 3:2 ratio
+    pcall(function()
+        term.setSize(36, 12)
+    end)
+    term_w, term_h = term.getSize()
 
     if fs.exists("paint_data") then
         local f = fs.open("paint_data", "r")
@@ -108,63 +113,74 @@ local function drawTerminal()
     term.clear()
     term.setCursorPos(1, 1)
 
+    -- Title
     term.setTextColor(colors.cyan)
-    print("=== MONITOR PAINTER ===")
-    print("")
-
-    term.setTextColor(colors.white)
-    term.write("Monitor: ")
+    term.write("PAINTER")
+    term.setTextColor(colors.gray)
+    term.write("  ")
     term.setTextColor(colors.lightBlue)
-    print(MON_W .. "x" .. MON_H)
-
+    term.write(MON_W .. "x" .. MON_H)
+    term.setTextColor(colors.gray)
+    term.write("  cursor:")
     term.setTextColor(colors.white)
-    term.write("Cursor:  ")
-    term.setTextColor(colors.lightBlue)
-    print(cursor_x .. "," .. cursor_y)
+    term.write(cursor_x .. "," .. cursor_y)
 
-    term.setTextColor(colors.white)
-    term.write("Brush:   ")
+    -- Brush
+    term.setCursorPos(1, 2)
+    term.setTextColor(colors.gray)
+    term.write("brush: ")
     term.setTextColor(brush)
     local cidx = colors_list[brush_idx]
-    print(cidx and cidx.name or "?")
-
-    term.setTextColor(colors.white)
-    term.write("Pixels:  ")
+    term.write(cidx and cidx.name or "?")
+    term.setTextColor(colors.gray)
+    term.write("  pixels:")
     term.setTextColor(colors.lightBlue)
     local count = 0
     for _ in pairs(pixels) do count = count + 1 end
-    print(count)
+    term.write(tostring(count))
 
-    print("")
+    -- Controls line
+    term.setCursorPos(1, 3)
     term.setTextColor(colors.gray)
-    print("Arrows/WASD Move  Space Paint")
-    print("Backspace    Erase X     Help")
+    term.write("arrows:move space:paint back:erase x:help")
 
-    if show_controls then
-        print("")
+    if show_help then
+        local y = 5
+        term.setCursorPos(1, y)
         term.setTextColor(colors.cyan)
-        print("--- CONTROLS ---")
-        term.setTextColor(colors.white)
-        print("  Arrows/WASD  Move cursor")
-        print("  Space        Paint pixel")
-        print("  Backspace    Erase pixel")
-        print("  1-9,0        Select color")
-        print("  [ / ]        Cycle colors")
-        print("  L            Fill line right")
-        print("  R            Fill rect to cursor")
-        print("  C            Clear all")
-        print("  S            Save")
-        print("  Q            Quit")
-        print("")
+        term.write("--- KEYS ---")
+        y = y + 1
+        local cmds = {
+            "arrows/WASD  move",
+            "space        paint",
+            "backspace    erase",
+            "1-9,0        color",
+            "[ / ]        cycle",
+            "L            line right",
+            "R            rect to cursor",
+            "C            clear",
+            "S            save",
+            "Q            quit",
+        }
+        for _, cmd in ipairs(cmds) do
+            term.setCursorPos(1, y)
+            term.setTextColor(colors.white)
+            term.write("  " .. cmd)
+            y = y + 1
+        end
+
+        y = y + 1
+        term.setCursorPos(1, y)
         term.setTextColor(colors.cyan)
-        print("--- COLORS ---")
+        term.write("--- COLORS ---")
+        y = y + 1
         for i, c in ipairs(colors_list) do
             local key = i <= 9 and tostring(i) or "0"
+            term.setCursorPos(1, y)
             term.setTextColor(c.val)
-            term.write(key .. ":" .. c.name .. "  ")
-            if i % 3 == 0 then print("") end
+            term.write(" " .. key .. " " .. c.name)
+            y = y + 1
         end
-        term.setTextColor(colors.white)
     end
 end
 
@@ -202,7 +218,7 @@ while true do
         return
 
     elseif key == keys.x then
-        show_controls = not show_controls
+        show_help = not show_help
 
     elseif key == keys.left or key == keys.a then
         cursor_x = math.max(1, cursor_x - 1)
