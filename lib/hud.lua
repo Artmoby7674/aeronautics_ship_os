@@ -1,202 +1,291 @@
 local HUD = {}
 
+-- Monitor: 3x2 at scale 0.5 = 48x20 chars
 local MON_W, MON_H = 48, 20
 local SCALE = 0.5
 
-local function ensureMonitor(mon)
-    if not mon then return false end
-    pcall(function()
-        mon.setTextScale(SCALE)
-    end)
-    return true
-end
+-- Colors
+local C = {
+    bg       = colors.black,
+    header   = colors.blue,
+    sidebar  = colors.blue,
+    text     = colors.lightBlue,
+    bright   = colors.white,
+    dim      = colors.gray,
+    good     = colors.green,
+    warn     = colors.yellow,
+    bad      = colors.red,
+    accent   = colors.cyan,
+    bar      = colors.blue,
+    barempty = colors.darkGray,
+    panel    = colors.black,
+}
 
-local function clear(mon)
-    mon.setBackgroundColor(colors.black)
-    mon.setTextColor(colors.white)
+local function setup(mon)
+    pcall(function() mon.setTextScale(SCALE) end)
+    mon.setBackgroundColor(C.bg)
     mon.clear()
-    mon.setCursorPos(1, 1)
 end
 
-local function drawBox(mon, x, y, w, h, color)
+local function box(mon, x, y, w, h, color)
     mon.setBackgroundColor(color)
     for dy = 0, h - 1 do
         mon.setCursorPos(x, y + dy)
         mon.write(string.rep(" ", w))
     end
-    mon.setBackgroundColor(colors.black)
+    mon.setBackgroundColor(C.bg)
 end
 
-local function drawText(mon, x, y, text, fg, bg)
+local function txt(mon, x, y, text, color)
     mon.setCursorPos(x, y)
-    if fg then mon.setTextColor(fg) end
-    if bg then
-        mon.setBackgroundColor(bg)
-        mon.write(text)
-        mon.setBackgroundColor(colors.black)
-    else
-        mon.write(text)
-    end
+    mon.setTextColor(color or C.text)
+    mon.setBackgroundColor(C.bg)
+    mon.write(text)
 end
 
-local function drawHLine(mon, x, y, w, color)
+local function hline(mon, x, y, w, color)
     mon.setBackgroundColor(color)
     mon.setCursorPos(x, y)
     mon.write(string.rep(" ", w))
-    mon.setBackgroundColor(colors.black)
+    mon.setBackgroundColor(C.bg)
 end
 
-local function drawVLine(mon, x, y, h, color)
-    mon.setBackgroundColor(color)
-    for dy = 0, h - 1 do
-        mon.setCursorPos(x, y + dy)
-        mon.write(" ")
-    end
-    mon.setBackgroundColor(colors.black)
-end
-
-local function bar(value, max_val, width)
-    local ratio = math.max(0, math.min(1, value / max_val))
+local function bar(val, max_val, width)
+    local ratio = math.max(0, math.min(1, val / max_val))
     local filled = math.floor(ratio * width + 0.5)
-    local empty = width - filled
-    return string.rep(string.char(219), filled) .. string.rep(string.char(176), empty)
+    return string.rep(string.char(219), filled) .. string.rep(string.char(176), width - filled)
 end
 
-local function alignRight(text, width)
+local function rpad(text, width)
+    if #text >= width then return text:sub(1, width) end
+    return text .. string.rep(" ", width - #text)
+end
+
+local function lpad(text, width)
     if #text >= width then return text:sub(1, width) end
     return string.rep(" ", width - #text) .. text
 end
 
-function HUD.render(mon, status, config, status_msg)
-    if not ensureMonitor(mon) then return end
-    clear(mon)
+-- ============================================================
+-- Tab definitions
+-- ============================================================
 
+local tabs = {
+    { id = "flight",  label = "FLT",  icon = ">" },
+    { id = "engine",  label = "ENG",  icon = "#" },
+    { id = "systems", label = "SYS",  icon = "*" },
+}
+
+local active_tab = "flight"
+
+-- ============================================================
+-- Sidebar (left 8 chars)
+-- ============================================================
+
+local function drawSidebar(mon)
+    -- ArtCorp logo area
+    box(mon, 1, 1, 8, 2, C.header)
+    txt(mon, 2, 1, "ART", C.bright)
+    txt(mon, 2, 2, "CORP", C.bright)
+
+    -- Separator line
+    hline(mon, 1, 3, 8, C.dim)
+
+    -- Tab list
+    for i, tab in ipairs(tabs) do
+        local y = 3 + i
+        if tab.id == active_tab then
+            box(mon, 1, y, 8, 1, C.header)
+            txt(mon, 1, y, " " .. tab.icon .. " " .. tab.label, C.bright)
+        else
+            txt(mon, 1, y, "   " .. tab.label, C.dim)
+        end
+    end
+
+    -- Bottom separator
+    hline(mon, 1, 7, 8, C.dim)
+
+    -- System info at bottom of sidebar
+    txt(mon, 1, 8,  "        ", C.dim)
+    txt(mon, 1, 9,  " ALT    ", C.dim)
+    txt(mon, 1, 10, " SPD    ", C.dim)
+    txt(mon, 1, 11, " CLB    ", C.dim)
+    txt(mon, 1, 12, "        ", C.dim)
+    txt(mon, 1, 13, " MODE   ", C.dim)
+end
+
+-- ============================================================
+-- Tab: Flight
+-- ============================================================
+
+local function drawFlightTab(mon, status)
+    local sx = 9  -- content start x
+
+    -- Altitude
     local alt = status.altitude or 0
-    local tgt_alt = status.target_altitude or 0
-    local pitch = status.pitch or 0
-    local roll = status.roll or 0
-    local yaw = status.yaw or 0
+    local tgt = status.target_altitude or 0
+    txt(mon, sx, 8, "ALT ", C.dim)
+    txt(mon, sx + 4, 8, lpad(string.format("%.0f", alt), 5), C.accent)
+    txt(mon, sx + 10, 8, "/" .. string.format("%.0f", tgt), C.dim)
+
+    -- Speed
     local spd = status.speed or 0
+    txt(mon, sx, 9, "SPD ", C.dim)
+    txt(mon, sx + 4, 9, lpad(string.format("%.0f", spd), 5), C.accent)
+    txt(mon, sx + 10, 9, "m/s", C.dim)
+
+    -- Climb
     local climb = status.climb_rate or 0
+    local climb_c = C.good
+    if climb < -2 then climb_c = C.bad
+    elseif climb < 0 then climb_c = C.warn
+    end
+    txt(mon, sx, 10, "CLB ", C.dim)
+    txt(mon, sx + 4, 10, lpad(string.format("%+.1f", climb), 5), climb_c)
+
+    -- Mode
     local mode = status.mode or "???"
-    local outputs = status.outputs or {}
-    local gains = status.pid_gains or {}
+    local mode_c = mode == "HOVER" and C.good or C.warn
+    txt(mon, sx, 12, "MODE ", C.dim)
+    txt(mon, sx + 5, 12, rpad(mode, 6), mode_c)
 
-    -- Title bar
-    drawBox(mon, 1, 1, MON_W, 1, colors.blue)
-    drawText(mon, 2, 1, "ARTCORPOS", colors.white, colors.blue)
-    drawText(mon, 30, 1, mode, colors.yellow, colors.blue)
-
-    -- Altitude column (left side)
-    local alt_x = 2
-    drawText(mon, alt_x, 3, "ALT", colors.cyan)
-    drawText(mon, alt_x, 4, string.format("%5.0f", alt), colors.white)
-    drawText(mon, alt_x + 6, 4, "/" .. string.format("%.0f", tgt_alt), colors.gray)
-
-    local alt_bar_w = 20
-    local alt_diff = tgt_alt - alt
-    local alt_bar_val = 10 + alt_diff * 0.5
-    drawText(mon, alt_x, 6, "ALT", colors.gray)
-    drawHLine(mon, alt_x, 7, alt_bar_w, colors.darkGray)
-    local filled = math.floor(math.max(0, math.min(alt_bar_val, 20)))
+    -- Altitude bar
+    hline(mon, sx, 14, 16, C.barempty)
+    local alt_diff = tgt - alt
+    local bar_val = 8 + alt_diff * 0.5
+    local filled = math.floor(math.max(0, math.min(bar_val, 16)))
     for i = 1, filled do
-        drawText(mon, alt_x + i - 1, 7, string.char(219), colors.green)
+        txt(mon, sx + i - 1, 14, string.char(219), C.bar)
     end
+end
 
-    -- Speed column
-    local spd_x = 15
-    drawText(mon, spd_x, 3, "SPD", colors.cyan)
-    drawText(mon, spd_x, 4, string.format("%5.0f", spd), colors.white)
-    drawText(mon, spd_x, 5, "m/s", colors.gray)
+-- ============================================================
+-- Tab: Engine (propeller outputs)
+-- ============================================================
 
-    -- Climb rate
-    drawText(mon, spd_x, 7, "CLB", colors.cyan)
-    local climb_color = colors.green
-    if climb < -2 then climb_color = colors.red
-    elseif climb < 0 then climb_color = colors.yellow
-    end
-    drawText(mon, spd_x, 8, string.format("%+5.1f", climb), climb_color)
+local function drawEngineTab(mon, status)
+    local sx = 9
+    local outputs = status.outputs or {}
 
-    -- Attitude indicator (center)
-    local att_x = 26
-    local att_y = 3
-    drawText(mon, att_x, att_y, "--- ATTITUDE ---", colors.white)
+    txt(mon, sx, 8, "--- PROPELLERS ---", C.text)
 
-    local pitch_bar = string.rep("=", 20)
-    local roll_bar = string.rep("=", 20)
-
-    drawText(mon, att_x, att_y + 2, "P:", colors.gray)
-    local p_str = string.format("%+6.1f", pitch)
-    local p_color = colors.green
-    if math.abs(pitch) > 10 then p_color = colors.red
-    elseif math.abs(pitch) > 5 then p_color = colors.yellow
-    end
-    drawText(mon, att_x + 3, att_y + 2, p_str, p_color)
-
-    drawText(mon, att_x, att_y + 3, "R:", colors.gray)
-    local r_str = string.format("%+6.1f", roll)
-    local r_color = colors.green
-    if math.abs(roll) > 10 then r_color = colors.red
-    elseif math.abs(roll) > 5 then r_color = colors.yellow
-    end
-    drawText(mon, att_x + 3, att_y + 3, r_str, r_color)
-
-    drawText(mon, att_x, att_y + 4, "Y:", colors.gray)
-    drawText(mon, att_x + 3, att_y + 4, string.format("%+7.1f", yaw), colors.white)
-
-    -- Output signals
-    local out_x = 26
-    local out_y = 8
-    drawText(mon, out_x, out_y, "--- OUTPUTS ---", colors.white)
-
-    drawText(mon, out_x, out_y + 1, "THR:", colors.gray)
-    drawText(mon, out_x + 5, out_y + 1, bar(outputs.speed or 0, 15, 8), colors.green)
-
-    local tilt_labels = {"FL", "FR", "RL", "RR"}
-    for i, label in ipairs(tilt_labels) do
-        local tilt_val = outputs[label .. "_tilt"] or 0
-        local tilt_color = colors.green
-        if math.abs(tilt_val) > 8 then tilt_color = colors.red
-        elseif math.abs(tilt_val) > 4 then tilt_color = colors.yellow
+    local props = {"FL", "FR", "RL", "RR"}
+    for i, p in ipairs(props) do
+        local tilt = outputs[p .. "_tilt"] or 0
+        local tc = C.good
+        if math.abs(tilt) > 8 then tc = C.bad
+        elseif math.abs(tilt) > 4 then tc = C.warn
         end
-        drawText(mon, out_x, out_y + 1 + i, label .. ":", colors.gray)
-        drawText(mon, out_x + 5, out_y + 1 + i, string.format("%+5.1f", tilt_val), tilt_color)
+        txt(mon, sx, 8 + i, p .. ":", C.dim)
+        txt(mon, sx + 4, 8 + i, string.format("%+5.1f", tilt), tc)
     end
 
-    drawText(mon, out_x, out_y + 6, "RFW:", colors.gray)
-    drawText(mon, out_x + 5, out_y + 6, bar(outputs.rear_fw or 0, 15, 8), colors.green)
-    drawText(mon, out_x, out_y + 7, "RBW:", colors.gray)
-    drawText(mon, out_x + 5, out_y + 7, bar(outputs.rear_bw or 0, 15, 8), colors.green)
+    -- Thrust bar
+    txt(mon, sx, 13, "THR:", C.dim)
+    txt(mon, sx + 4, 13, bar(outputs.speed or 0, 15, 10), C.good)
 
-    -- PID gains (right sidebar)
-    local pid_x = 39
-    local pid_y = 3
-    drawText(mon, pid_x, pid_y, "--- PID ---", colors.white)
+    -- Rear thrusters
+    txt(mon, sx, 14, "RFW:", C.dim)
+    txt(mon, sx + 4, 14, bar(outputs.rear_fw or 0, 15, 10), C.good)
+    txt(mon, sx, 15, "RBW:", C.dim)
+    txt(mon, sx + 4, 15, bar(outputs.rear_bw or 0, 15, 10), C.good)
+end
 
-    local pid_labels = {"altitude", "pitch", "roll", "yaw"}
-    local pid_short = {"ALT", "PIT", "ROL", "YAW"}
-    for i, key in ipairs(pid_labels) do
-        local g = gains[key] or {}
-        drawText(mon, pid_x, pid_y + 1 + i, pid_short[i], colors.gray)
-        drawText(mon, pid_x + 4, pid_y + 1 + i,
-            string.format("K%.1f I%.2f D%.1f",
-                g.kp or 0, g.ki or 0, g.kd or 0), colors.white)
+-- ============================================================
+-- Tab: Systems (PID gains, attitude)
+-- ============================================================
+
+local function drawSystemsTab(mon, status)
+    local sx = 9
+
+    -- Attitude
+    txt(mon, sx, 8, "PITCH", C.dim)
+    local pitch = status.pitch or 0
+    local pc = C.good
+    if math.abs(pitch) > 10 then pc = C.bad
+    elseif math.abs(pitch) > 5 then pc = C.warn
+    end
+    txt(mon, sx + 6, 8, string.format("%+6.1f", pitch), pc)
+
+    txt(mon, sx, 9, "ROLL ", C.dim)
+    local roll = status.roll or 0
+    local rc = C.good
+    if math.abs(roll) > 10 then rc = C.bad
+    elseif math.abs(roll) > 5 then rc = C.warn
+    end
+    txt(mon, sx + 6, 9, string.format("%+6.1f", roll), rc)
+
+    txt(mon, sx, 10, "YAW  ", C.dim)
+    txt(mon, sx + 6, 10, string.format("%+6.1f", status.yaw or 0), C.text)
+
+    -- PID gains
+    hline(mon, sx, 11, 16, C.dim)
+    txt(mon, sx, 12, "--- PID ---", C.text)
+
+    local pid = {
+        { label = "ALT", gains = (status.pid_gains or {}).altitude },
+        { label = "PIT", gains = (status.pid_gains or {}).pitch },
+        { label = "ROL", gains = (status.pid_gains or {}).roll },
+        { label = "YAW", gains = (status.pid_gains or {}).yaw },
+    }
+
+    for i, p in ipairs(pid) do
+        local g = p.gains or {}
+        txt(mon, sx, 12 + i, p.label, C.dim)
+        txt(mon, sx + 4, 12 + i,
+            string.format("P%.1f I%.2f D%.1f",
+                g.kp or 0, g.ki or 0, g.kd or 0), C.text)
+    end
+end
+
+-- ============================================================
+-- Main render
+-- ============================================================
+
+function HUD.render(mon, status, config, status_msg)
+    if not mon then return end
+    setup(mon)
+
+    drawSidebar(mon)
+
+    if active_tab == "flight" then
+        drawFlightTab(mon, status)
+    elseif active_tab == "engine" then
+        drawEngineTab(mon, status)
+    elseif active_tab == "systems" then
+        drawSystemsTab(mon, status)
     end
 
-    -- Status line
+    -- Status bar at bottom
+    box(mon, 9, MON_H - 1, MON_W - 8, 1, C.header)
     if status_msg and status_msg ~= "" then
-        drawBox(mon, 1, MON_H, MON_W, 1, colors.yellow)
-        drawText(mon, 2, MON_H, status_msg, colors.black, colors.yellow)
+        txt(mon, 9, MON_H - 1, " " .. status_msg, C.bright)
     else
-        drawBox(mon, 1, MON_H, MON_W, 1, colors.darkGray)
-        local fuel_str = ""
-        if config and config.fuel then
-            fuel_str = string.format(" | FUEL: %s %ds",
-                config.fuel.type or "?",
-                config.fuel.tank_capacity or 0)
-        end
-        drawText(mon, 2, MON_H, "HOLD:Q/E | MODE:M | STOP:X" .. fuel_str, colors.lightGray, colors.darkGray)
+        local hint = "Q/E:ALT  M:MODE  X:STOP  T:TUNE"
+        txt(mon, 9, MON_H - 1, " " .. hint, C.bright)
     end
+end
+
+function HUD.nextTab()
+    for i, tab in ipairs(tabs) do
+        if tab.id == active_tab then
+            active_tab = tabs[(i % #tabs) + 1].id
+            return
+        end
+    end
+end
+
+function HUD.setTab(id)
+    for _, tab in ipairs(tabs) do
+        if tab.id == id then
+            active_tab = id
+            return
+        end
+    end
+end
+
+function HUD.getTab()
+    return active_tab
 end
 
 return HUD

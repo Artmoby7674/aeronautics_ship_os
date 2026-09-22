@@ -144,6 +144,12 @@ function OS.handleKey(key, held)
             status_message = "Alt-: " .. string.format("%.1f", flight.targets.altitude)
             status_time = os.clock()
         end
+
+    elseif key == keys.n then
+        local hud = require("lib.hud")
+        hud.nextTab()
+        status_message = "Tab: " .. hud.getTab():upper()
+        status_time = os.clock()
     end
 end
 
