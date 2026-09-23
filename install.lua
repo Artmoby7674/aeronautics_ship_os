@@ -14,6 +14,8 @@ local files = {
     "lib/flight.lua",
     "lib/os_main.lua",
     "lib/hud.lua",
+    "lib/gfx.lua",
+    "lib/font.lua",
 }
 
 print("=============================")

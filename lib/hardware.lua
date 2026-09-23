@@ -9,7 +9,6 @@ end
 function Hardware.scan()
     local found = {}
 
-    -- Scan wired network
     local modem = peripheral.find("modem", function(name, m)
         return not m.isWireless()
     end)
@@ -21,7 +20,6 @@ function Hardware.scan()
         end
     end
 
-    -- Scan wireless peripherals
     local wireless = peripheral.find("modem", function(name, m)
         return m.isWireless()
     end)
@@ -33,8 +31,8 @@ function Hardware.scan()
                 local wname = peripheral.getName(dev)
                 if wname then
                     local already = false
-                    for _, f in ipairs(found) do
-                        if f.name == wname then already = true break end
+                    for _, d in ipairs(found) do
+                        if d.name == wname then already = true break end
                     end
                     if not already then
                         table.insert(found, { name = wname, type = ptype, via = "wireless" })
@@ -61,29 +59,9 @@ function Hardware.connect()
                 connected[key] = wrapped
                 print("  [OK] " .. key .. " -> " .. name)
             else
-                table.insert(missing, key .. " (" .. name .. ")")
-                print("  [FAIL] " .. key .. " -> " .. name)
+                table.insert(missing, key .. " (" .. tostring(name) .. ")")
+                print("  [FAIL] " .. key .. " -> " .. tostring(name))
             end
-        end
-    end
-
-    if config.peripherals.main_monitor then
-        local mon = peripheral.wrap(config.peripherals.main_monitor)
-        if mon then
-            connected.main_monitor = mon
-            print("  [OK] main_monitor -> " .. config.peripherals.main_monitor)
-        else
-            table.insert(missing, "main_monitor (" .. config.peripherals.main_monitor .. ")")
-        end
-    end
-
-    if config.peripherals.speaker then
-        local spk = peripheral.wrap(config.peripherals.speaker)
-        if spk then
-            connected.speaker = spk
-            print("  [OK] speaker -> " .. config.peripherals.speaker)
-        else
-            table.insert(missing, "speaker (" .. config.peripherals.speaker .. ")")
         end
     end
 
@@ -97,7 +75,7 @@ end
 
 function Hardware.readInputs()
     local keys = {}
-    for relayKey, sides in pairs(config.input_map) do
+    for relayKey, sides in pairs(config.input_map or {}) do
         local relay = devices[relayKey]
         if relay then
             for key, side in pairs(sides) do
@@ -116,8 +94,32 @@ function Hardware.isKeyPressed(key)
     return (keys[key] or 0) > 0
 end
 
+function Hardware.getProximity()
+    local prox = config.proximity
+    if not prox then return 0 end
+    local relay = devices[prox.input_key]
+    if not relay then return 0 end
+    local ok, val = pcall(function()
+        return relay.getAnalogInput(prox.side)
+    end)
+    if not ok or type(val) ~= "number" then return 0 end
+    return math.max(0, math.min(15, math.floor(val)))
+end
+
+function Hardware.setGear(deployed)
+    local g = config.gear_output
+    if not g then return false end
+    local relay = devices[g.relay]
+    if not relay then return false end
+    local value = deployed and (g.deploy or 15) or (g.retract or 0)
+    local ok = pcall(function()
+        relay.setAnalogOutput(g.side, value)
+    end)
+    return ok
+end
+
 function Hardware.setPropellerOutput(prop, side, value)
-    local mapping = config.output_map[prop]
+    local mapping = (config.output_map or {})[prop]
     if not mapping then return false end
 
     local relay = devices[mapping.relay]
@@ -128,7 +130,7 @@ function Hardware.setPropellerOutput(prop, side, value)
 
     value = math.max(0, math.min(15, math.floor(value + 0.5)))
 
-    local success, err = pcall(function()
+    local success = pcall(function()
         relay.setAnalogOutput(relaySide, value)
     end)
 
@@ -136,7 +138,7 @@ function Hardware.setPropellerOutput(prop, side, value)
 end
 
 function Hardware.setRearOutput(direction, value)
-    local mapping = config.output_map.REAR
+    local mapping = (config.output_map or {}).REAR
     if not mapping then return false end
 
     local relay = devices[mapping.relay]
@@ -147,7 +149,7 @@ function Hardware.setRearOutput(direction, value)
 
     value = math.max(0, math.min(15, math.floor(value + 0.5)))
 
-    local success, err = pcall(function()
+    local success = pcall(function()
         relay.setAnalogOutput(relaySide, value)
     end)
 
@@ -155,7 +157,7 @@ function Hardware.setRearOutput(direction, value)
 end
 
 function Hardware.cutAllOutputs()
-    for prop, mapping in pairs(config.output_map) do
+    for prop, mapping in pairs(config.output_map or {}) do
         local relay = devices[mapping.relay]
         if relay then
             pcall(function()
@@ -241,7 +243,7 @@ function Hardware.getShipState()
 end
 
 function Hardware.hasSable()
-    return type(sublevel) == "table" and type(sublevel.isInPlotGrid) == "function"
+    return type(sublevel) == "table" and type(sublevel.getLogicalPose) == "function"
 end
 
 function Hardware.playNote(instrument, volume, pitch)

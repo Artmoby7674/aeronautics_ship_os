@@ -7,6 +7,7 @@ A ComputerCraft flight stabilization and control system for my Create:Aeronautic
 - Minecraft with the Create:Aeronautics mod
 - CC:Tweaked
 - CC:Sable addon
+- CC:Graphics (pixel HUD)
 
 ## Quick Install
 
@@ -22,6 +23,14 @@ Then run:
 startup
 ```
 
+On boot you get a **save-slot menu** (setup phase only):
+
+| Key | Action |
+|-----|--------|
+| W/S | Move cursor |
+| Space | Load slot / create new save in empty slot |
+| D | Delete (press D again to confirm, Space cancels) |
+
 ## Manual Install
 
 Copy all files from this repo into a CC:Tweaked computer's filesystem:
@@ -35,6 +44,8 @@ atlas_os/
   lib/flight.lua
   lib/os_main.lua
   lib/hud.lua
+  lib/gfx.lua
+  lib/font.lua
 ```
 
 ## Physical Setup
@@ -76,27 +87,43 @@ Each Redstone Relay has 6 faces. Place Redstone Links on the faces:
 
 ## Controls
 
-| Key | Function |
-|-----|----------|
-| W/S | Forward/Backward movement (hover) |
-| A/D | Left/Right strafe (hover) or Bank turn (cruise) |
-| Q/E | Altitude up/down (hover mode) |
-| M | Toggle Hover/Cruise mode |
+| Input | Function |
+|-------|----------|
+| W/S | All props tilt forward/back (hover) |
+| A/D | Strafe left/right via bank (hover) |
+| Q/E | Yaw left/right (hover) / heading adjust (cruise) |
+| Space / Ctrl | Altitude target +/− (PID takeoff/land) |
+| Shift redstone (aux left) | Hover ↔ Cruise (rising-edge toggle, hold-safe) |
+| L | Toggle auto-landing |
+| G | Toggle landing gear |
+| M | Toggle Hover/Cruise (keyboard) |
 | X | Emergency stop |
 | T | Auto-tune PIDs |
-| R | Reset targets to current state |
+| R | Reset targets |
+| N | Next HUD tab |
+
+### Aux relay (mode + landing)
+
+| Face | Function |
+|------|----------|
+| Left | Shift receiver → mode toggle |
+| Front | Emitter → landing gear deploy |
+| Back | Proximity receiver under front gear (0–15, 15 = on ground) |
+
+Auto-landing (`L`): deploys gear, descends on proximity until signal = 15, then props to 0.
+Manual land: gear auto-deploys when proximity ≥ 1.
 
 ## Modes
 
 ### Hover Mode
-- Full PID stabilization on all axes
-- WASD controls movement by tilting propellers
-- Q/E adjusts altitude target
+- Starts on boot; props default speed 0
+- W/S collective tilt, A/D bank strafe, Q/E yaw
+- Space/Ctrl changes altitude target through PID
+- Level/heading PIDs stabilize when sticks centered
 
 ### Cruise Mode
 - Altitude hold and heading lock
-- A/D banks the ship for turning
-- Rear thrusters at full speed
+- Rear thrusters for thrust; Q/E adjusts heading
 
 ## Configuration
 

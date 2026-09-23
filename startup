@@ -107,43 +107,282 @@ print("")
 promptContinue("  When all modems are removed, press any key.")
 
 -- ============================================================
--- Step 1: Load config
+-- Step 1: Config slot menu (setup phase only)
 -- ============================================================
 
-print("[1/5] Loading configuration...")
+local MAX_SLOTS = 8
 
-local configs = {}
-local configFiles = fs.list(configDir)
-for _, file in ipairs(configFiles) do
-    if file:match("%.lua$") and not file:match("^assignments_") then
-        table.insert(configs, (file:gsub("%.lua$", "")))
-    end
+local FALLBACK_TEMPLATE = [[return {
+    name = "NewShip",
+    version = "1.0",
+    computer_offset = { x = 0, y = 6, z = 0 },
+    peripherals = {
+        input_1 = "relay_1",
+        input_2 = "relay_2",
+        aux_relay = "relay_aux",
+        output_FL = "relay_3",
+        output_FR = "relay_4",
+        output_RL = "relay_5",
+        output_RR = "relay_6",
+        output_REAR = "relay_7",
+        main_monitor = "main_monitor",
+    },
+    input_map = {
+        input_1 = { W = "front", S = "back", A = "left", D = "right" },
+        input_2 = { Q = "front", E = "back" },
+        aux_relay = { SHIFT = "left", PROX = "back" },
+    },
+    gear_output = { relay = "aux_relay", side = "front", deploy = 15, retract = 0 },
+    proximity = { input_key = "aux_relay", side = "back", landed_threshold = 15, gear_deploy_threshold = 1, max_blocks = 15 },
+    output_map = {
+        FL   = { relay = "output_FL", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
+        FR   = { relay = "output_FR", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
+        RL   = { relay = "output_RL", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
+        RR   = { relay = "output_RR", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
+        REAR = { relay = "output_REAR", fw = "front", bw = "back" },
+    },
+    propellers = {
+        FL = { x = -3, y = 0, z = 3 },
+        FR = { x = 3,  y = 0, z = 3 },
+        RL = { x = -3, y = 0, z = -3 },
+        RR = { x = 3,  y = 0, z = -3 },
+    },
+    limits = {
+        max_speed = 80, max_altitude = 320, min_altitude = 0,
+        max_tilt = 15, max_climb_rate = 10, max_descent_rate = 5,
+        hover_speed = 2, tilt_max = 12, hover_min_speed = 0, hover_max_speed = 15,
+        land_descent_rate = 0.8, alt_step = 2, cruise_rear = 12,
+    },
+    fuel = { type = "charcoal", smelt_time = 80, items_per_smelt = 8, tank_capacity = 12960 },
+    pid = {
+        altitude = { kp = 1.2, ki = 0.15, kd = 0.6, integral_limit = 10 },
+        pitch    = { kp = 2.0, ki = 0.0, kd = 1.0, integral_limit = 5 },
+        roll     = { kp = 2.0, ki = 0.0, kd = 1.0, integral_limit = 5 },
+        yaw      = { kp = 2.2, ki = 0.0, kd = 1.4, integral_limit = 5, output_limit = 15 },
+    },
+    signal = { max = 15, min = 0 },
+    optional_peripherals = { "aux_relay" },
+}
+]]
+
+local function sanitizeSlotName(raw)
+    raw = tostring(raw or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    raw = raw:gsub("[^%w%-_]", "")
+    if raw == "" then return nil end
+    if #raw > 24 then raw = raw:sub(1, 24) end
+    if raw:match("^assignments_") then return nil end
+    return raw
 end
 
-if #configs == 0 then
-    print("  ERROR: No config files found in " .. configDir .. "/")
-    return
+local function listConfigNames()
+    local names = {}
+    if not fs.exists(configDir) then
+        fs.makeDir(configDir)
+    end
+    for _, file in ipairs(fs.list(configDir)) do
+        if file:match("%.lua$") and not file:match("^assignments_") then
+            table.insert(names, (file:gsub("%.lua$", "")))
+        end
+    end
+    table.sort(names, function(a, b) return a:lower() < b:lower() end)
+    return names
 end
 
-local selected_config = nil
-if #configs == 1 then
-    selected_config = configs[1]
-    print("  Found config: " .. selected_config)
-else
-    print("  Available configs:")
-    for i, name in ipairs(configs) do
-        print("    " .. i .. ") " .. name)
+local function buildSlots()
+    local names = listConfigNames()
+    local slots = {}
+    for i = 1, MAX_SLOTS do
+        slots[i] = names[i] or false -- false = empty
     end
-    write("  Select config (1-" .. #configs .. "): ")
-    local choice = read()
-    local idx = tonumber(choice)
-    if idx and idx >= 1 and idx <= #configs then
-        selected_config = configs[idx]
+    return slots
+end
+
+local function templateSourceName(slots)
+    for _, s in ipairs(slots) do
+        if s then return s end
+    end
+    if fs.exists(configDir .. "/atlas.lua") then return "atlas" end
+    return nil
+end
+
+local function writeNewConfig(slotName, templateName)
+    local data
+    if templateName and fs.exists(configDir .. "/" .. templateName .. ".lua") then
+        local h = fs.open(configDir .. "/" .. templateName .. ".lua", "r")
+        data = h.readAll()
+        h.close()
+        data = data:gsub('name%s*=%s*"[^"]*"', 'name = "' .. slotName .. '"', 1)
     else
-        print("  Invalid selection.")
-        return
+        data = FALLBACK_TEMPLATE:gsub('name%s*=%s*"[^"]*"', 'name = "' .. slotName .. '"', 1)
+    end
+    local out = fs.open(configDir .. "/" .. slotName .. ".lua", "w")
+    if not out then return false end
+    out.write(data)
+    out.close()
+    return true
+end
+
+local function deleteConfig(slotName)
+    local ok = pcall(function()
+        if fs.exists(configDir .. "/" .. slotName .. ".lua") then
+            fs.delete(configDir .. "/" .. slotName .. ".lua")
+        end
+        local afile = configDir .. "/assignments_" .. slotName .. ".lua"
+        if fs.exists(afile) then
+            fs.delete(afile)
+        end
+    end)
+    return ok
+end
+
+local function drawConfigMenu(slots, cursor, confirmIdx, message)
+    term.clear()
+    term.setCursorPos(1, 1)
+
+    if term.isColor() then term.setTextColor(colors.blue) end
+    print("========================================")
+    print("        ARTCORPOS SAVE SLOTS")
+    print("   Select a ship config to load")
+    print("========================================")
+    if term.isColor() then term.setTextColor(colors.white) end
+    print("")
+
+    for i, slot in ipairs(slots) do
+        local y = select(2, term.getCursorPos())
+        local prefix = (i == cursor) and "> " or "  "
+        local label
+        if slot then
+            label = string.format("%d) %s", i, slot)
+        else
+            label = string.format("%d) [ empty slot ]", i)
+        end
+
+        local is_confirm = (confirmIdx == i)
+        if i == cursor and not is_confirm and term.isColor() then
+            term.setTextColor(colors.yellow)
+        end
+        if is_confirm and term.isColor() then
+            term.setTextColor(colors.red)
+        end
+        write(prefix .. label)
+        if is_confirm then
+            write("   DELETE? D=yes  SPACE=no")
+        end
+        if term.isColor() then term.setTextColor(colors.white) end
+        print("")
+    end
+
+    print("")
+    if message then
+        if term.isColor() then term.setTextColor(colors.lime) end
+        print(message)
+        if term.isColor() then term.setTextColor(colors.white) end
+    end
+    print("W/S move   SPACE select/save   D delete")
+    print("In confirm: D=confirm  SPACE=cancel")
+end
+
+local function configSlotMenu()
+    local keysLib = require("keys")
+    local slots = buildSlots()
+    local cursor = 1
+    local confirmIdx = nil
+    local message = nil
+
+    -- If exactly one config exists, still show menu (user asked for game-like flow)
+    while true do
+        drawConfigMenu(slots, cursor, confirmIdx, message)
+        message = nil
+
+        local event, key, held = os.pullEvent("key")
+        if event == "key" and not held then
+            if key == keysLib.up or key == keysLib.w then
+                confirmIdx = nil
+                cursor = cursor - 1
+                if cursor < 1 then cursor = MAX_SLOTS end
+
+            elseif key == keysLib.down or key == keysLib.s then
+                confirmIdx = nil
+                cursor = cursor + 1
+                if cursor > MAX_SLOTS then cursor = 1 end
+
+            elseif key == keysLib.space then
+                if confirmIdx then
+                    confirmIdx = nil
+                    message = "Delete cancelled"
+                else
+                    local slot = slots[cursor]
+                    if slot then
+                        return slot
+                    end
+                    term.clear()
+                    term.setCursorPos(1, 1)
+                    print("New save in slot " .. cursor)
+                    print("Enter ship name (letters/numbers/_/-):")
+                    write("> ")
+                    local raw = read()
+                    local name = sanitizeSlotName(raw)
+                    if not name then
+                        message = "Invalid name"
+                    else
+                        local taken = false
+                        for _, s in ipairs(slots) do
+                            if s == name then taken = true break end
+                        end
+                        if taken or fs.exists(configDir .. "/" .. name .. ".lua") then
+                            message = "Name already used"
+                        else
+                            local tmpl = templateSourceName(slots)
+                            if writeNewConfig(name, tmpl) then
+                                slots = buildSlots()
+                                for i, s in ipairs(slots) do
+                                    if s == name then cursor = i break end
+                                end
+                                message = "Created '" .. name .. "' — SPACE to load"
+                            else
+                                message = "Failed to write config"
+                            end
+                        end
+                    end
+                end
+
+            elseif key == keysLib.d then
+                local slot = slots[cursor]
+                if not slot then
+                    message = "Empty slot — nothing to delete"
+                elseif confirmIdx == cursor then
+                    if deleteConfig(slot) then
+                        message = "Deleted '" .. slot .. "'"
+                    else
+                        message = "Delete failed"
+                    end
+                    confirmIdx = nil
+                    slots = buildSlots()
+                    if not slots[cursor] then
+                        for i, s in ipairs(slots) do
+                            if s then cursor = i break end
+                        end
+                        if not slots[cursor] then cursor = 1 end
+                    end
+                else
+                    confirmIdx = cursor
+                    message = "Press D again to delete '" .. slot .. "'"
+                end
+
+            elseif key == keysLib.enter or key == keysLib.numPadEnter then
+                local slot = slots[cursor]
+                if slot and not confirmIdx then
+                    return slot
+                end
+            end
+        end
     end
 end
+
+print("[1/5] Config slots")
+local selected_config = configSlotMenu()
+print("  Loaded slot: " .. selected_config)
+print("")
 
 local config_path = configDir .. "." .. selected_config
 local ok, config = pcall(require, config_path)
@@ -263,6 +502,46 @@ for key, name in pairs(assignments) do
     config.peripherals[key] = name
 end
 
+-- Assign optional peripherals that are missing (e.g. aux_relay)
+local function saveAssignments()
+    local save_fn = io.open(assignments_file, "w")
+    if not save_fn then return false end
+    save_fn:write("return {\n")
+    for key, name in pairs(assignments) do
+        save_fn:write('  [' .. string.format("%q", key) .. '] = ' .. string.format("%q", name) .. ',\n')
+    end
+    save_fn:write("}\n")
+    save_fn:close()
+    return true
+end
+
+local optional = config.optional_peripherals or {}
+if #optional > 0 then
+    local baseline = scanNetwork()
+    local any_new = false
+    for _, key in ipairs(optional) do
+        local current = assignments[key]
+        local wrapped = current and peripheral.wrap(current)
+        if not wrapped then
+            any_new = true
+            print("[3b] Optional peripheral: " .. key)
+            print("  Connect this device's modem, then right-click it.")
+            print("  Press any key when ready...")
+            os.pullEvent("key")
+            local new_dev = waitForNewDevice(baseline)
+            assignments[key] = new_dev.name
+            config.peripherals[key] = new_dev.name
+            table.insert(baseline, new_dev)
+            print("  -> Assigned: " .. key .. " = " .. new_dev.name)
+            print("")
+        end
+    end
+    if any_new and saveAssignments() then
+        print("  Assignments updated: " .. assignments_file)
+        print("")
+    end
+end
+
 print("")
 
 -- ============================================================
@@ -304,8 +583,19 @@ term.setCursorPos(1, 1)
 print("Starting ArtCorpOS...")
 print("")
 
-if not package.path:match("lib/%?%.lua") then
-    package.path = "lib/?.lua;" .. package.path
+-- Ensure lib/*.lua can be required as lib.gfx, lib.hud, etc.
+local paths = {
+    "?.lua",
+    "./?.lua",
+    "/?.lua",
+    "lib/?.lua",
+    "./lib/?.lua",
+    "/lib/?.lua",
+}
+for _, p in ipairs(paths) do
+    if not package.path:find(p, 1, true) then
+        package.path = p .. ";" .. package.path
+    end
 end
 
 local os_main = require(libDir .. ".os_main")
