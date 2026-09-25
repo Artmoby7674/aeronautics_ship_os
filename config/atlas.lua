@@ -1,27 +1,61 @@
 return {
     name = "Atlas",
-    version = "1.1",
+    version = "1.2", -- bump forces full peripheral re-wizard when assignments are older
 
     -- Offset of computer from center of mass (in blocks)
     -- Positive X = right, Positive Y = up, Positive Z = forward
     computer_offset = { x = 0, y = 6, z = 56 },
 
-    -- Wired network device names
-    peripherals = {
-        -- Input relays (typewriter / redstone link receivers)
-        input_1 = "relay_1",  -- WASD
-        input_2 = "relay_2",  -- Q/E (yaw)
-        aux_relay = "relay_aux", -- shift + gear + proximity (assign at boot)
+    -- Feature flags: OS only offers / runs what the ship actually has.
+    -- Multi-ship packs flip these off without changing OS code.
+    features = {
+        hud = true,
+        gear = true,
+        auto_land = true,
+        cruise_mode = true,
+        auto_tune = true,
+        engine_auto_start = true, -- boot sequence: starter pulse + clutch
+        clutch = true,
+        fuel_level = false,       -- reserved: fuel container item count later
+        strafe = false,           -- Atlas has no lateral thrusters; set true on ships that do
+    },
 
-        -- Output relays (propeller transmitter links)
+    -- Engine start + clutch (one relay, two faces)
+    -- Boot: starter (left) high for start_seconds, wait clutch_delay, clutch (right) high.
+    -- Shutdown (grounded power button): clutch off. Starter always off when not booting.
+    engine = {
+        relay_key = "engine_relay",
+        start_side = "left",
+        clutch_side = "right",
+        start_seconds = 3,
+        clutch_delay = 1,   -- after starter stops
+        boot_seconds = 5,   -- total loading bar length
+        active = 15,
+        inactive = 0,
+    },
+
+    -- Reserved for later fuel-container readout (do not wire yet)
+    fuel = {
+        type = "charcoal",
+        smelt_time = 80,
+        items_per_smelt = 8,
+        tank_capacity = 12960,
+        -- inventory_key = nil, -- peripheral that will report item counts
+        -- container_slot = nil,
+    },
+
+    -- Wired network device names (target names for the setup wizard)
+    peripherals = {
+        input_1 = "relay_1",     -- WASD
+        input_2 = "relay_2",     -- Q/E/Space/Ctrl
+        aux_relay = "relay_aux", -- shift + gear + proximity
+        engine_relay = "relay_eng", -- engine start (L) + clutch (R)
         output_FL = "relay_3",
         output_FR = "relay_4",
         output_RL = "relay_5",
         output_RR = "relay_6",
         output_REAR = "relay_7",
-
         main_monitor = "main_monitor",
-        -- speaker = "speaker_0",
     },
 
     -- Which side of each input relay has which key's link
@@ -33,16 +67,17 @@ return {
             D = "right",
         },
         input_2 = {
-            Q = "front", -- yaw left (FL/RL bwd, FR/RR fwd)
-            E = "back",  -- yaw right
+            Q = "left",
+            E = "right",
+            SPACE = "front",
+            CTRL = "back",
         },
         aux_relay = {
-            SHIFT = "left",   -- mode toggle (rising edge)
-            PROX = "back",    -- proximity sensor 0-15, 15 = on ground
+            SHIFT = "left",
+            PROX = "back",
         },
     },
 
-    -- Same aux relay: front face drives landing gear deploy emitter
     gear_output = {
         relay = "aux_relay",
         side = "front",
@@ -50,31 +85,38 @@ return {
         retract = 0,
     },
 
-    -- Proximity: signal strength (0-15), stronger = closer.
-    -- 15 = touching ground, 14 = ~1 block above, 0 = far/no detection
     proximity = {
         input_key = "aux_relay",
         side = "back",
         landed_threshold = 15,
-        gear_deploy_threshold = 1, -- deploy gear when ground in range (manual land)
+        gear_deploy_threshold = 1,
         max_blocks = 15,
+        -- Sensor rides on the front gear bottom; deploying drops it ~6 blocks
+        -- closer for a moment. Wait this many 20Hz ticks before trust landed.
+        gear_settle_ticks = 20,
     },
 
     output_map = {
-        FL   = { relay = "output_FL", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
+        -- Slow-down link: left props use relay left face, right props right face
+        FL   = { relay = "output_FL", tilt_fwd = "front", tilt_bwd = "back", speed = "left" },
         FR   = { relay = "output_FR", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
-        RL   = { relay = "output_RL", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
+        RL   = { relay = "output_RL", tilt_fwd = "front", tilt_bwd = "back", speed = "left" },
         RR   = { relay = "output_RR", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
         REAR = { relay = "output_REAR", fw = "front", bw = "back" },
     },
 
-    -- Propeller positions relative to center of mass (in blocks)
-    -- BL/BR in controls = rear-left/rear-right (RL/RR)
     propellers = {
         FL = { x = -3, y = 0, z = 3 },
         FR = { x = 3,  y = 0, z = 3 },
         RL = { x = -3, y = 0, z = -3 },
         RR = { x = 3,  y = 0, z = -3 },
+    },
+
+    -- Create Aeronautics gravity (wiki: F/m across several blocks) = 11 m/s².
+    -- Altitude PID is designed around this: plant gain k ≈ g / hover_throttle
+    -- (speed units → m/s²) with ζ ≈ 0.8 so hover does not wobble.
+    physics = {
+        gravity = 11, -- m/s²
     },
 
     limits = {
@@ -85,32 +127,31 @@ return {
         max_climb_rate = 10,
         max_descent_rate = 5,
         hover_speed = 2,
-        -- signed tilt command range (redstone scale applied later)
         tilt_max = 12,
-        -- prop speed when airborne hover idle (0 = fully reduced when landed)
         hover_min_speed = 0,
         hover_max_speed = 15,
-        -- auto-land descent rate blocks/s
+        -- Thrust that cancels m*g at rest (feedforward). Must be accurate or
+        -- the integral has to make up the difference (slow drift then overshoot).
+        hover_throttle = 6,
         land_descent_rate = 0.8,
-        -- altitude step for Space/Control (blocks)
-        alt_step = 2,
-        -- rear thruster cruise base
+        alt_step = 5,
         cruise_rear = 12,
-    },
-
-    fuel = {
-        type = "charcoal",
-        smelt_time = 80,
-        items_per_smelt = 8,
-        tank_capacity = 12960,
+        cruise_ramp = 8,             -- speed units/s while W/S held in cruise
+        cruise_speed_deadband = 1.5, -- ± this speed: hold rear thrust (air resistance)
+        landed_creep = 1,            -- parked prop speed (slow-down wire 14)
     },
 
     pid = {
-        altitude = { kp = 1.2, ki = 0.15, kd = 0.6, integral_limit = 10 },
-        pitch    = { kp = 2.0, ki = 0.0, kd = 1.0, integral_limit = 5 },
-        roll     = { kp = 2.0, ki = 0.0, kd = 1.0, integral_limit = 5 },
-        -- yaw uses wrapped heading error + gyro rate damp (see flight:rotationControl)
+        -- Altitude from g=11, hover=6 → k = 11/6; ωn=0.8, ζ=0.8:
+        --   kp = ωn²/k ≈ 0.35, kd = 2ζωn/k ≈ 0.70
+        -- D on climb_rate (no step kick); I only near target (anti-windup).
+        altitude = { kp = 0.35, ki = 0.08, kd = 0.70, integral_limit = 8, output_limit = 7,
+            d_on_measurement = true, integral_separation = 2.5 },
+        pitch    = { kp = 2.0, ki = 0.0, kd = 1.0, integral_limit = 5, output_limit = 6 },
+        roll     = { kp = 2.0, ki = 0.0, kd = 1.0, integral_limit = 5, output_limit = 6 },
         yaw      = { kp = 2.2, ki = 0.0, kd = 1.4, integral_limit = 5, output_limit = 15 },
+        -- cruise horizontal speed -> rear thruster 0..15
+        speed    = { kp = 0.15, ki = 0.04, kd = 0.0, integral_limit = 40, output_limit = 15 },
     },
 
     signal = {
@@ -118,6 +159,6 @@ return {
         min = 0,
     },
 
-    -- Optional peripherals assigned at boot if missing
-    optional_peripherals = { "aux_relay" },
+    -- Assigned at boot if present in peripherals but not yet mapped
+    optional_peripherals = { "aux_relay", "engine_relay" },
 }

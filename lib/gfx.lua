@@ -2,7 +2,20 @@
 -- All coordinates are 0-based pixels. Direct monitor path preferred;
 -- falls back to term.redirect(mon).
 
-local Font = require("lib.font")
+local function loadLib(name)
+    local ok, mod = pcall(require, name)
+    if ok then return mod end
+    local path = (name:gsub("%.", "/")) .. ".lua"
+    local fn = loadfile(path)
+    if fn then
+        local ok2, res = pcall(fn)
+        if ok2 then return res end
+        error(res, 0)
+    end
+    error(mod, 0)
+end
+
+local Font = loadLib("lib.font")
 
 local Gfx = {
     supported = false,
@@ -180,6 +193,27 @@ function Gfx.text(x, y, str, color, bg)
     str = Font.fit(str, Gfx.W - x)
     if str == "" then return end
     local rows = Font.render(str, color or 0, bg)
+    call("drawPixels", x, y, rows)
+end
+
+function Gfx.textScaled(x, y, str, color, bg, scale)
+    scale = math.floor(scale or 1)
+    if scale < 1 then scale = 1 end
+    str = tostring(str or "")
+    if str == "" or not Gfx.supported then return end
+    local max_w = Gfx.W - x
+    if max_w < 1 or y >= Gfx.H then return end
+    if x < 0 then return end
+    -- fit in scaled pixels
+    while scale > 1 and Font.textWidthScaled(str, scale) > max_w do
+        scale = scale - 1
+    end
+    if Font.textWidthScaled(str, scale) > max_w then
+        str = Font.fit(str, math.floor(max_w / scale))
+        if str == "" then return end
+    end
+    local rows, _, th = Font.renderScaled(str, color or 0, bg, scale)
+    if y + th <= 0 then return end
     call("drawPixels", x, y, rows)
 end
 

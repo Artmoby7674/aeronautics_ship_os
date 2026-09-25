@@ -130,4 +130,55 @@ function Font.render(str, color, bg)
     return rows, total_w
 end
 
+function Font.textWidthScaled(str, scale)
+    scale = scale or 1
+    if scale < 1 then scale = 1 end
+    return Font.textWidth(str) * scale
+end
+
+-- Each font pixel becomes scale×scale block (dense rows for drawPixels)
+function Font.renderScaled(str, color, bg, scale)
+    scale = math.floor(scale or 1)
+    if scale < 1 then scale = 1 end
+    str = tostring(str or "")
+    local fill = bg or -1
+    local base_w = Font.textWidth(str)
+    if base_w < 1 or #str == 0 then return {}, 0 end
+
+    local total_w = base_w * scale
+    local total_h = Font.height * scale
+    local rows = {}
+    for r = 1, total_h do
+        local row = {}
+        for c = 1, total_w do
+            row[c] = fill
+        end
+        rows[r] = row
+    end
+
+    local col = 0
+    for i = 1, #str do
+        local ch = str:sub(i, i):upper()
+        local g = G[ch] or G["?"]
+        for r = 1, Font.height do
+            local line = g[r]
+            for c = 1, Font.width do
+                if line:sub(c, c) == "1" then
+                    local x0 = (col + c - 1) * scale
+                    local y0 = (r - 1) * scale
+                    for dy = 0, scale - 1 do
+                        local row = rows[y0 + dy + 1]
+                        for dx = 0, scale - 1 do
+                            row[x0 + dx + 1] = color
+                        end
+                    end
+                end
+            end
+        end
+        col = col + Font.advance
+    end
+
+    return rows, total_w, total_h
+end
+
 return Font

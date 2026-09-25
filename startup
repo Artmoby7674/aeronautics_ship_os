@@ -1,9 +1,52 @@
 -- ArtCorpOS - Startup
 -- Setup wizard: connect peripherals one at a time, auto-detect and assign
 
-local version = "1.0"
+local version = "1.1"
 local configDir = "config"
 local libDir = "lib"
+
+-- Ensure lib/*.lua and root modules resolve for the whole startup script
+local function ensurePackagePath()
+    local paths = {
+        "?.lua",
+        "./?.lua",
+        "/?.lua",
+        "lib/?.lua",
+        "./lib/?.lua",
+        "/lib/?.lua",
+    }
+    for _, p in ipairs(paths) do
+        if not tostring(package.path or ""):find(p, 1, true) then
+            package.path = p .. ";" .. tostring(package.path or "")
+        end
+    end
+end
+ensurePackagePath()
+
+-- keys is a CC:Tweaked global, not a filesystem module
+local keysLib = keys or rawget(_G, "keys")
+if not keysLib then
+    local ok, mod = pcall(require, "keys")
+    if ok then keysLib = mod end
+end
+if not keysLib then
+    error("keys API not available (CC:Tweaked required)")
+end
+
+-- ============================================================
+-- Ship identity (root ship.lua) — which ship is this computer on?
+-- ============================================================
+
+local ship = { id = "Unknown", name = "SHIP", profile = "atlas" }
+if fs.exists("ship.lua") then
+    local sok, sdata = pcall(function()
+        local fn = loadfile("ship.lua")
+        if fn then return fn() end
+    end)
+    if sok and type(sdata) == "table" then
+        ship = sdata
+    end
+end
 
 -- ============================================================
 -- Helpers
@@ -89,6 +132,7 @@ end
 print("========================================")
 print("        ARTCORPOS v" .. version)
 print("   Flight Stabilization System")
+print("  Ship: " .. tostring(ship.name or ship.id))
 print("========================================")
 if term.isColor() then
     term.setTextColor(colors.white)
@@ -114,12 +158,34 @@ local MAX_SLOTS = 8
 
 local FALLBACK_TEMPLATE = [[return {
     name = "NewShip",
-    version = "1.0",
+    version = "1.2",
     computer_offset = { x = 0, y = 6, z = 0 },
+    features = {
+        hud = true,
+        gear = true,
+        auto_land = true,
+        cruise_mode = true,
+        auto_tune = true,
+        engine_auto_start = false,
+        clutch = false,
+        fuel_level = false,
+        strafe = false, -- set true only if the ship has lateral thrusters
+    },
+    engine = {
+        relay_key = "engine_relay",
+        start_side = "left",
+        clutch_side = "right",
+        start_seconds = 3,
+        clutch_delay = 1,
+        boot_seconds = 5,
+        active = 15,
+        inactive = 0,
+    },
     peripherals = {
         input_1 = "relay_1",
         input_2 = "relay_2",
         aux_relay = "relay_aux",
+        engine_relay = "relay_eng",
         output_FL = "relay_3",
         output_FR = "relay_4",
         output_RL = "relay_5",
@@ -129,15 +195,15 @@ local FALLBACK_TEMPLATE = [[return {
     },
     input_map = {
         input_1 = { W = "front", S = "back", A = "left", D = "right" },
-        input_2 = { Q = "front", E = "back" },
+        input_2 = { Q = "left", E = "right", SPACE = "front", CTRL = "back" },
         aux_relay = { SHIFT = "left", PROX = "back" },
     },
     gear_output = { relay = "aux_relay", side = "front", deploy = 15, retract = 0 },
-    proximity = { input_key = "aux_relay", side = "back", landed_threshold = 15, gear_deploy_threshold = 1, max_blocks = 15 },
+    proximity = { input_key = "aux_relay", side = "back", landed_threshold = 15, gear_deploy_threshold = 1, max_blocks = 15, gear_settle_ticks = 20 },
     output_map = {
-        FL   = { relay = "output_FL", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
+        FL   = { relay = "output_FL", tilt_fwd = "front", tilt_bwd = "back", speed = "left" },
         FR   = { relay = "output_FR", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
-        RL   = { relay = "output_RL", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
+        RL   = { relay = "output_RL", tilt_fwd = "front", tilt_bwd = "back", speed = "left" },
         RR   = { relay = "output_RR", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
         REAR = { relay = "output_REAR", fw = "front", bw = "back" },
     },
@@ -151,17 +217,26 @@ local FALLBACK_TEMPLATE = [[return {
         max_speed = 80, max_altitude = 320, min_altitude = 0,
         max_tilt = 15, max_climb_rate = 10, max_descent_rate = 5,
         hover_speed = 2, tilt_max = 12, hover_min_speed = 0, hover_max_speed = 15,
-        land_descent_rate = 0.8, alt_step = 2, cruise_rear = 12,
+        hover_throttle = 6,
+        land_descent_rate = 0.8,
+        alt_step = 5,
+        cruise_rear = 12,
+        cruise_ramp = 8,
+        cruise_speed_deadband = 1.5,
+        landed_creep = 1,
     },
+    physics = { gravity = 11 },
     fuel = { type = "charcoal", smelt_time = 80, items_per_smelt = 8, tank_capacity = 12960 },
     pid = {
-        altitude = { kp = 1.2, ki = 0.15, kd = 0.6, integral_limit = 10 },
-        pitch    = { kp = 2.0, ki = 0.0, kd = 1.0, integral_limit = 5 },
-        roll     = { kp = 2.0, ki = 0.0, kd = 1.0, integral_limit = 5 },
+        altitude = { kp = 0.35, ki = 0.08, kd = 0.70, integral_limit = 8, output_limit = 7,
+            d_on_measurement = true, integral_separation = 2.5 },
+        pitch    = { kp = 2.0, ki = 0.0, kd = 1.0, integral_limit = 5, output_limit = 6 },
+        roll     = { kp = 2.0, ki = 0.0, kd = 1.0, integral_limit = 5, output_limit = 6 },
         yaw      = { kp = 2.2, ki = 0.0, kd = 1.4, integral_limit = 5, output_limit = 15 },
+        speed    = { kp = 0.15, ki = 0.04, kd = 0.0, integral_limit = 40, output_limit = 15 },
     },
     signal = { max = 15, min = 0 },
-    optional_peripherals = { "aux_relay" },
+    optional_peripherals = { "aux_relay", "engine_relay" },
 }
 ]]
 
@@ -171,6 +246,7 @@ local function sanitizeSlotName(raw)
     if raw == "" then return nil end
     if #raw > 24 then raw = raw:sub(1, 24) end
     if raw:match("^assignments_") then return nil end
+    if raw:match("^pid_") then return nil end -- would collide with pid_<slot>.lua
     return raw
 end
 
@@ -180,7 +256,7 @@ local function listConfigNames()
         fs.makeDir(configDir)
     end
     for _, file in ipairs(fs.list(configDir)) do
-        if file:match("%.lua$") and not file:match("^assignments_") then
+        if file:match("%.lua$") and not file:match("^assignments_") and not file:match("^pid_") then
             table.insert(names, (file:gsub("%.lua$", "")))
         end
     end
@@ -191,7 +267,9 @@ end
 local function buildSlots()
     local names = listConfigNames()
     local slots = {}
-    for i = 1, MAX_SLOTS do
+    -- never truncate existing configs (MAX_SLOTS is only a minimum menu size)
+    local n = math.max(#names, MAX_SLOTS)
+    for i = 1, n do
         slots[i] = names[i] or false -- false = empty
     end
     return slots
@@ -230,6 +308,10 @@ local function deleteConfig(slotName)
         local afile = configDir .. "/assignments_" .. slotName .. ".lua"
         if fs.exists(afile) then
             fs.delete(afile)
+        end
+        local pfile = configDir .. "/pid_" .. slotName .. ".lua"
+        if fs.exists(pfile) then
+            fs.delete(pfile)
         end
     end)
     return ok
@@ -283,7 +365,6 @@ local function drawConfigMenu(slots, cursor, confirmIdx, message)
 end
 
 local function configSlotMenu()
-    local keysLib = require("keys")
     local slots = buildSlots()
     local cursor = 1
     local confirmIdx = nil
@@ -299,12 +380,12 @@ local function configSlotMenu()
             if key == keysLib.up or key == keysLib.w then
                 confirmIdx = nil
                 cursor = cursor - 1
-                if cursor < 1 then cursor = MAX_SLOTS end
+                if cursor < 1 then cursor = #slots end
 
             elseif key == keysLib.down or key == keysLib.s then
                 confirmIdx = nil
                 cursor = cursor + 1
-                if cursor > MAX_SLOTS then cursor = 1 end
+                if cursor > #slots then cursor = 1 end
 
             elseif key == keysLib.space then
                 if confirmIdx then
@@ -390,6 +471,7 @@ if not ok then
     print("  ERROR: Failed to load config: " .. tostring(config))
     return
 end
+config.slot = selected_config -- runtime only: used for config/pid_<slot>.lua
 print("  Config loaded: " .. config.name .. " v" .. (config.version or "unknown"))
 print("")
 
@@ -398,7 +480,19 @@ print("")
 -- ============================================================
 
 print("[2/5] Loading hardware library...")
-local Hardware = require(libDir .. ".hardware")
+local function loadLib(name)
+    local ok, mod = pcall(require, name)
+    if ok then return mod end
+    local path = (name:gsub("%.", "/")) .. ".lua"
+    local fn = loadfile(path)
+    if fn then
+        local ok2, res = pcall(fn)
+        if ok2 then return res end
+        error(res, 0)
+    end
+    error(mod, 0)
+end
+local Hardware = loadLib(libDir .. ".hardware")
 Hardware.init(config)
 print("  Hardware library loaded")
 print("")
@@ -407,62 +501,130 @@ print("")
 -- Step 3: Setup wizard
 -- ============================================================
 
+local peripheral_desc = {
+    input_1 = "Typewriter relay for WASD keys",
+    input_2 = "Typewriter relay for Q/E/Space/Ctrl",
+    aux_relay = "Aux relay: shift / gear / proximity",
+    engine_relay = "Engine relay: LEFT=start, RIGHT=clutch",
+    output_FL = "Front-left propeller relay",
+    output_FR = "Front-right propeller relay",
+    output_RL = "Rear-left propeller relay",
+    output_RR = "Rear-right propeller relay",
+    output_REAR = "Rear thruster relay",
+    main_monitor = "HUD display monitor",
+    speaker = "Audio speaker",
+}
+
+local function peripheralOrder()
+    return {
+        input_1 = 1, input_2 = 2,
+        aux_relay = 3,
+        engine_relay = 4,
+        output_FL = 5, output_FR = 6, output_RL = 7, output_RR = 8,
+        output_REAR = 9,
+        main_monitor = 10, speaker = 11,
+    }
+end
+
+local function buildRequired()
+    local required = {}
+    local order = peripheralOrder()
+    for key, name in pairs(config.peripherals) do
+        if name and name ~= "" then
+            table.insert(required, {
+                key = key,
+                target = name,
+                desc = peripheral_desc[key] or key,
+            })
+        end
+    end
+    table.sort(required, function(a, b)
+        return (order[a.key] or 99) < (order[b.key] or 99)
+    end)
+    return required
+end
+
+local function writeAssignments(path, data)
+    local save_fn = io.open(path, "w")
+    if not save_fn then return false end
+    save_fn:write("return {\n")
+    if data.config_version then
+        save_fn:write("  config_version = " .. string.format("%q", data.config_version) .. ",\n")
+    end
+    if data.ship_id then
+        save_fn:write("  ship_id = " .. string.format("%q", data.ship_id) .. ",\n")
+    end
+    for key, name in pairs(data) do
+        if key ~= "config_version" and key ~= "ship_id" then
+            save_fn:write("  [" .. string.format("%q", key) .. "] = " .. string.format("%q", name) .. ",\n")
+        end
+    end
+    save_fn:write("}\n")
+    save_fn:close()
+    return true
+end
+
+local function assignmentsCompatible(asaved)
+    if type(asaved) ~= "table" then return false, "not a table" end
+    if asaved.config_version ~= config.version then
+        return false, "config v" .. tostring(asaved.config_version) .. " -> v" .. tostring(config.version)
+    end
+    for key, name in pairs(config.peripherals) do
+        if name and name ~= "" and not asaved[key] then
+            return false, "missing " .. key
+        end
+    end
+    return true, "ok"
+end
+
 -- Check for saved assignments
 local assignments_file = configDir .. "/assignments_" .. selected_config .. ".lua"
 local assignments = {}
 local has_saved = false
+local stale_reason = nil
 if fs.exists(assignments_file) then
     local aok, asaved = pcall(function()
         local fn = loadfile(assignments_file)
         if fn then return fn() end
     end)
-    if aok and asaved and type(asaved) == "table" then
-        assignments = asaved
-        has_saved = true
+    if aok and type(asaved) == "table" then
+        local ok, why = assignmentsCompatible(asaved)
+        if ok then
+            assignments = asaved
+            has_saved = true
+        else
+            stale_reason = why
+            print("[3/5] Saved assignments OUTDATED (" .. tostring(why) .. ")")
+            print("  Full peripheral re-wizard required.")
+            print("")
+        end
     end
 end
 
 if has_saved then
-    print("[3/5] Using saved peripheral assignments")
+    print("[3/5] Using saved peripheral assignments (config v" .. tostring(config.version) .. ")")
     for key, name in pairs(assignments) do
-        print("  " .. key .. " -> " .. name)
+        if key ~= "config_version" and key ~= "ship_id" then
+            print("  " .. key .. " -> " .. name)
+        end
     end
     print("")
 else
+    if stale_reason then
+        print("  Disconnect ALL modems again for a clean re-scan.")
+        promptContinue("  When all modems are removed, press any key.")
+    end
     print("[3/5] Peripheral setup wizard")
-    print("  This will guide you through connecting each peripheral.")
+    print("  Ship: " .. tostring(ship.name or ship.id) .. "  config v" .. tostring(config.version))
     print("  Connect one device at a time when prompted.")
     print("")
 
-    -- Build list of required peripherals from config
-    local required = {}
-    for key, name in pairs(config.peripherals) do
-        if name and name ~= "" then
-            local desc = ""
-            if key == "input_1" then desc = "Typewriter relay for WASD keys"
-            elseif key == "input_2" then desc = "Typewriter relay for Q/E keys"
-            elseif key == "output_FL" then desc = "Front-left propeller relay"
-            elseif key == "output_FR" then desc = "Front-right propeller relay"
-            elseif key == "output_RL" then desc = "Rear-left propeller relay"
-            elseif key == "output_RR" then desc = "Rear-right propeller relay"
-            elseif key == "output_REAR" then desc = "Rear thruster relay"
-            elseif key == "main_monitor" then desc = "HUD display monitor"
-            elseif key == "speaker" then desc = "Audio speaker"
-            else desc = key
-            end
-            table.insert(required, { key = key, target = name, desc = desc })
-        end
-    end
+    assignments = {}
+    assignments.config_version = config.version
+    assignments.ship_id = ship.id
 
-    -- Sort: inputs first, then outputs, then optional
-    local order = { input_1 = 1, input_2 = 2, output_FL = 3, output_FR = 4,
-                    output_RL = 5, output_RR = 6, output_REAR = 7,
-                    main_monitor = 8, speaker = 9 }
-    table.sort(required, function(a, b)
-        return (order[a.key] or 99) < (order[b.key] or 99)
-    end)
+    local required = buildRequired()
 
-    -- Scan baseline
     print("  Scanning current network...")
     local baseline = scanNetwork()
     print("  Found " .. #baseline .. " device(s) already connected.")
@@ -480,39 +642,24 @@ else
         print("  -> Assigned: " .. req.key)
         print("")
 
-        -- Update baseline so next scan doesn't re-detect this one
         table.insert(baseline, new_dev)
     end
 
-    -- Save assignments
-    local save_fn = io.open(assignments_file, "w")
-    if save_fn then
-        save_fn:write("return {\n")
-        for key, name in pairs(assignments) do
-            save_fn:write('  [' .. string.format("%q", key) .. '] = ' .. string.format("%q", name) .. ',\n')
-        end
-        save_fn:write("}\n")
-        save_fn:close()
+    if writeAssignments(assignments_file, assignments) then
         print("  Assignments saved to " .. assignments_file)
     end
 end
 
--- Apply assignments to config
+-- Apply assignments to config (skip bookkeeping keys)
 for key, name in pairs(assignments) do
-    config.peripherals[key] = name
+    if key ~= "config_version" and key ~= "ship_id" then
+        config.peripherals[key] = name
+    end
 end
 
--- Assign optional peripherals that are missing (e.g. aux_relay)
+-- Assign optional peripherals that are still missing after a compatible save
 local function saveAssignments()
-    local save_fn = io.open(assignments_file, "w")
-    if not save_fn then return false end
-    save_fn:write("return {\n")
-    for key, name in pairs(assignments) do
-        save_fn:write('  [' .. string.format("%q", key) .. '] = ' .. string.format("%q", name) .. ',\n')
-    end
-    save_fn:write("}\n")
-    save_fn:close()
-    return true
+    return writeAssignments(assignments_file, assignments)
 end
 
 local optional = config.optional_peripherals or {}
@@ -524,7 +671,8 @@ if #optional > 0 then
         local wrapped = current and peripheral.wrap(current)
         if not wrapped then
             any_new = true
-            print("[3b] Optional peripheral: " .. key)
+            print("[3b] Optional peripheral: " .. key ..
+                " (" .. (peripheral_desc[key] or key) .. ")")
             print("  Connect this device's modem, then right-click it.")
             print("  Press any key when ready...")
             os.pullEvent("key")
@@ -536,9 +684,13 @@ if #optional > 0 then
             print("")
         end
     end
-    if any_new and saveAssignments() then
-        print("  Assignments updated: " .. assignments_file)
-        print("")
+    if any_new then
+        assignments.config_version = config.version
+        assignments.ship_id = ship.id
+        if saveAssignments() then
+            print("  Assignments updated: " .. assignments_file)
+            print("")
+        end
     end
 end
 
@@ -584,19 +736,8 @@ print("Starting ArtCorpOS...")
 print("")
 
 -- Ensure lib/*.lua can be required as lib.gfx, lib.hud, etc.
-local paths = {
-    "?.lua",
-    "./?.lua",
-    "/?.lua",
-    "lib/?.lua",
-    "./lib/?.lua",
-    "/lib/?.lua",
-}
-for _, p in ipairs(paths) do
-    if not package.path:find(p, 1, true) then
-        package.path = p .. ";" .. package.path
-    end
-end
+ensurePackagePath()
 
-local os_main = require(libDir .. ".os_main")
+local os_main = loadLib(libDir .. ".os_main")
+os_main.setShipInfo(ship)
 os_main.start(config, Hardware)

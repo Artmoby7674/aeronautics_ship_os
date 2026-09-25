@@ -1,4 +1,17 @@
-local PID = require("lib.pid")
+local function loadLib(name)
+    local ok, mod = pcall(require, name)
+    if ok then return mod end
+    local path = (name:gsub("%.", "/")) .. ".lua"
+    local fn = loadfile(path)
+    if fn then
+        local ok2, res = pcall(fn)
+        if ok2 then return res end
+        error(res, 0)
+    end
+    error(mod, 0)
+end
+
+local PID = loadLib("lib.pid")
 
 local Flight = {}
 Flight.__index = Flight
@@ -34,10 +47,9 @@ local function clamp(v, lo, hi)
     return v
 end
 
--- Ship angular velocity Y -> deg/s (Sable commonly reports rad/s)
-local function yawRateDps(av)
-    if not av or type(av.y) ~= "number" then return 0 end
-    local v = av.y
+-- Body rates (Sable usually rad/s; Create Avionics may report deg/s)
+local function rateDps(v)
+    if type(v) ~= "number" then return 0 end
     if math.abs(v) <= (2 * math.pi + 0.75) then
         return math.deg(v)
     end
@@ -56,6 +68,8 @@ function Flight.new(config, hardware)
         pitch    = PID.new(config.pid.pitch),
         roll     = PID.new(config.pid.roll),
         yaw      = PID.new(config.pid.yaw),
+        speed    = PID.new(config.pid.speed or
+            { kp = 0.15, ki = 0.04, kd = 0.0, integral_limit = 40, output_limit = 15 }),
     }
 
     self.targets = {
@@ -66,7 +80,11 @@ function Flight.new(config, hardware)
         move_forward = 0,
         move_right = 0,
         yaw_cmd = 0,
+        speed = 0, -- cruise speed target (W/S ramps it)
     }
+
+    self.cruise_rear_hold = nil -- rear thrust that holds target speed (nil = not yet known)
+    self.estop = false        -- latched by X until reset (R / altitude / mode)
 
     -- Explicit heading-hold state (0 is a valid heading — do not use as sentinel)
     self.heading_valid = false
@@ -80,11 +98,15 @@ function Flight.new(config, hardware)
         speed = 0,
         climb_rate = 0,
         angularVelocity = { x = 0, y = 0, z = 0 },
+        pitch_rate = 0,
+        roll_rate = 0,
+        yaw_rate = 0,
     }
 
-    -- signed tilt commands before split to fwd/bwd channels (-tilt_max..+tilt_max)
+    -- signed tilt (translation/yaw) + per-prop thrust 0..15 (altitude + attitude)
     self.outputs = {
         speed = 0,
+        FL_speed = 0, FR_speed = 0, RL_speed = 0, RR_speed = 0,
         FL_tilt = 0, FR_tilt = 0, RL_tilt = 0, RR_tilt = 0,
         rear_fw = 0, rear_bw = 0,
         -- legacy aliases used by HUD
@@ -93,6 +115,7 @@ function Flight.new(config, hardware)
 
     self.landed = false
     self.gear_down = false
+    self.gear_settle = 0
     self.auto_land = false
     self.land_state = Flight.LAND_IDLE
     self.proximity = 0
@@ -103,6 +126,11 @@ function Flight.new(config, hardware)
     self.update_count = 0
     self.tick_rate = 0.05
     self.tune_requested = false
+    self.tune_pending = false -- wait for airborne HOVER (e.g. boot while landed)
+    self.tuning = false
+    self.tune_speed = 0
+    self.tune_status = nil
+    self.onTuneComplete = nil -- function(ok) called when a tune finishes
     self.last_sable_error = nil
 
     return self
@@ -119,12 +147,17 @@ function Flight:setMode(mode)
 
     local old_mode = self.mode
     self.mode = mode
+    self.estop = false
 
     for _, pid in pairs(self.pid) do
         pid:reset()
     end
 
     self.targets.altitude = self.state.altitude
+    if mode == Flight.MODE_CRUISE then
+        self.targets.speed = self.state.speed
+        self.cruise_rear_hold = nil -- seed from PID on first cruise tick
+    end
     self:captureHeading()
 
     return true, old_mode, mode
@@ -158,7 +191,14 @@ function Flight:adjustAltitude(delta)
     if self.auto_land and self.land_state ~= Flight.LAND_IDLE then
         return false
     end
-    self.targets.altitude = self.targets.altitude + delta
+    if self.tuning then
+        return false -- do not move the setpoint mid-tune
+    end
+    self.estop = false -- pilot input cancels e-stop latch
+    local limits = self.config.limits or {}
+    local lo = limits.min_altitude or 0
+    local hi = limits.max_altitude or 320
+    self.targets.altitude = clamp(self.targets.altitude + delta, lo, hi)
     if self.landed and delta > 0 then
         -- command climb off ground
         self.landed = false
@@ -180,8 +220,11 @@ function Flight:setAutoLand(on)
     self.auto_land = on
     if on then
         self.land_state = Flight.LAND_ARMED
-        self.gear_down = true
-        self.hw.setGear(true)
+        if not self.gear_down then
+            self.gear_down = true
+            self.hw.setGear(true)
+            self.gear_settle = (self.config.proximity and self.config.proximity.gear_settle_ticks) or 20
+        end
         return true, "AUTO-LAND ARMED"
     else
         if self.land_state ~= Flight.LAND_DONE then
@@ -204,15 +247,53 @@ function Flight:updateState()
     self.state.speed = state.speed
     self.state.climb_rate = state.climb_rate
     self.state.angularVelocity = state.angularVelocity or { x = 0, y = 0, z = 0 }
-    self.yaw_rate_dps = yawRateDps(self.state.angularVelocity)
+    -- Create Avionics body rates: wx=pitch, wy=yaw, wz=roll
+    self.state.pitch_rate = rateDps(self.state.angularVelocity.x)
+    self.state.yaw_rate = rateDps(self.state.angularVelocity.y)
+    self.state.roll_rate = rateDps(self.state.angularVelocity.z)
+    self.yaw_rate_dps = self.state.yaw_rate
     if state.sable_error then
         self.last_sable_error = state.sable_error
     end
     return state
 end
 
+-- Sample attitude + outputs to stab_log.txt (0.5 s) while banked or pitched.
+function Flight:debugAttitude(dt)
+    self._dbg_t = (self._dbg_t or 0) + dt
+    if self._dbg_t < 0.5 then return end
+    self._dbg_t = 0
+    local st = self.state
+    if math.abs(st.roll or 0) < 1 and math.abs(st.pitch or 0) < 1 then return end
+    pcall(function()
+        local f = fs.open("stab_log.txt", "a")
+        if not f then return end
+        local o = self.outputs or {}
+        f.writeLine(string.format(
+            "t=%.1f pitch=%.1f roll=%.1f base=%s FL=%s FR=%s RL=%s RR=%s rear=%s/%s",
+            os.clock(), st.pitch or 0, st.roll or 0,
+            tostring(o.speed),
+            tostring(o.FL_speed), tostring(o.FR_speed),
+            tostring(o.RL_speed), tostring(o.RR_speed),
+            tostring(o.rear_fw), tostring(o.rear_bw)))
+        f.close()
+    end)
+end
+
+function Flight:hasFeature(name)
+    local f = self.config and self.config.features
+    if f and f[name] ~= nil then
+        return not not f[name]
+    end
+    if self.hw and self.hw.hasFeature then
+        return self.hw.hasFeature(name)
+    end
+    return true
+end
+
 function Flight:processInputs(keys)
     local limits = self.config.limits
+    local can_strafe = self:hasFeature("strafe")
 
     if self.mode == Flight.MODE_HOVER then
         local move_speed = limits.hover_speed
@@ -225,10 +306,15 @@ function Flight:processInputs(keys)
             self.targets.move_forward = 0
         end
 
-        if keys.A and keys.A > 0 then
-            self.targets.move_right = -move_speed
-        elseif keys.D and keys.D > 0 then
-            self.targets.move_right = move_speed
+        -- A/D only when the ship actually has lateral thrusters
+        if can_strafe then
+            if keys.A and keys.A > 0 then
+                self.targets.move_right = -move_speed
+            elseif keys.D and keys.D > 0 then
+                self.targets.move_right = move_speed
+            else
+                self.targets.move_right = 0
+            end
         else
             self.targets.move_right = 0
         end
@@ -245,6 +331,16 @@ function Flight:processInputs(keys)
         if keys.Q and keys.Q > 0 then yaw = -1
         elseif keys.E and keys.E > 0 then yaw = 1 end
         self.targets.yaw_cmd = yaw
+
+        -- W/S ramps horizontal speed target; release holds it
+        local limits = self.config.limits or {}
+        local ramp = (limits.cruise_ramp or 8) * self.tick_rate
+        local smax = limits.max_speed or 80
+        if keys.W and keys.W > 0 then
+            self.targets.speed = clamp((self.targets.speed or 0) + ramp, 0, smax)
+        elseif keys.S and keys.S > 0 then
+            self.targets.speed = clamp((self.targets.speed or 0) - ramp, 0, smax)
+        end
 
         self.targets.move_forward = 0
         self.targets.move_right = 0
@@ -279,7 +375,9 @@ function Flight:rotationControl(dt, yaw_stick, tilt_max)
         return yaw_tilt, rear
     end
 
-    -- Hands-off heading hold
+    -- Hands-off: no prop-tilt stabilisation (tilt is piloting-only for now;
+    -- heading autopilot via tilt may come later). Rear differential still
+    -- tracks heading in cruise (hover forces rear off elsewhere).
     if not self.heading_valid then
         self:captureHeading()
     end
@@ -294,7 +392,7 @@ function Flight:rotationControl(dt, yaw_stick, tilt_max)
     local d = -pid.kd * rate
 
     local out = clamp(p + i + d, -pid.output_limit, pid.output_limit)
-    yaw_tilt = clamp((out / pid.output_limit) * tilt_max, -tilt_max, tilt_max)
+    yaw_tilt = 0
     rear = clamp(out / pid.output_limit, -1, 1)
 
     -- Deadband: avoid micro-wiggle when nearly on heading and still
@@ -308,27 +406,48 @@ function Flight:rotationControl(dt, yaw_stick, tilt_max)
 end
 
 function Flight:update()
-    local now = os.clock()
-    local dt = now - self.last_update
-    self.last_update = now
+    -- Fixed 20 Hz control period (timer is started at 0.05s)
+    local dt = self.tick_rate
+    if dt <= 0 then dt = 0.05 end
+    self.last_update = os.clock()
     self.update_count = self.update_count + 1
-    if dt > 0.5 then dt = 0.05 end
 
     self:updateState()
+    self:debugAttitude(dt)
 
     self.proximity = self.hw.getProximity() or 0
     local prox_cfg = self.config.proximity or {}
     local landed_thr = prox_cfg.landed_threshold or 15
-    local gear_thr = prox_cfg.gear_deploy_threshold or 1
+    local deploy_thr = prox_cfg.gear_deploy_threshold or 1
 
-    -- Manual gear deploy when ground comes into range (not already deployed)
-    if not self.gear_down and self.proximity >= gear_thr then
+    -- Laser under/near the gear: any detection at or above the deploy
+    -- threshold forces gear down. Re-assert every tick (not just on the
+    -- rising edge) so a missed setGear / state desync cannot stick.
+    if self:hasFeature("gear") and self.proximity >= deploy_thr then
+        if not self.gear_down then
+            self.gear_settle = prox_cfg.gear_settle_ticks or 20
+            self._prox_deployed = true
+            if self.onGearAutoDeploy then
+                pcall(self.onGearAutoDeploy, self.proximity)
+            end
+        end
         self.gear_down = true
         self.hw.setGear(true)
     end
+    if self.gear_down then
+        if self.gear_settle and self.gear_settle > 0 then
+            self.gear_settle = self.gear_settle - 1
+        end
+    else
+        self.gear_settle = 0
+        self._prox_deployed = false
+    end
 
-    -- Ground contact detection
-    if self.proximity >= landed_thr then
+    -- Ground contact (ignore brief proximity spike while gear is deploying)
+    -- Gearless ships: no gear to settle, so ground contact is immediate
+    local gear_ready = (not self:hasFeature("gear"))
+        or (self.gear_down and (not self.gear_settle or self.gear_settle <= 0))
+    if self.proximity >= landed_thr and gear_ready then
         if not self.landed then
             self.landed = true
             if self.land_state == Flight.LAND_DESCEND or self.land_state == Flight.LAND_ARMED then
@@ -348,6 +467,55 @@ function Flight:update()
         end
     end
 
+    -- E-stop latch first: no tune may start or run while latched.
+    -- (emergencyStop finishes any active tune, so tuning is already false here.)
+    if self.estop then
+        self:cutPropsSoft()
+        self:applyOutputs()
+        return self.outputs
+    end
+
+    -- Altitude PID auto-tune: bang-bang while airborne in HOVER
+    if self.tuning then
+        if self.landed or self.mode ~= Flight.MODE_HOVER then
+            self:finishAutoTune(false, "aborted")
+        else
+            local done, tune_ok = self.pid.altitude:updateAutoTune(dt)
+            self:cutPropsSoft()
+            self:setUniformSpeed(self.tune_speed or 0)
+            self:applyOutputs()
+            if done then
+                local g = self.pid.altitude:getGains()
+                self:finishAutoTune(tune_ok, tune_ok
+                    and string.format("K%.1f I%.2f D%.1f", g.kp, g.ki, g.kd)
+                    or "no oscillation")
+            end
+            return self.outputs
+        end
+    end
+
+    -- Promote a pending tune once we are actually flying in HOVER
+    if self.tune_pending and not self.landed and self.mode == Flight.MODE_HOVER then
+        self.tune_pending = false
+        self.tune_requested = true
+        self.tune_status = "queued"
+    end
+
+    if self.tune_requested then
+        if self.landed or self.mode ~= Flight.MODE_HOVER then
+            -- conditions changed since the request (e.g. landed at boot)
+            self.tune_requested = false
+            self.tune_pending = true
+            self.tune_status = "waiting for air"
+        else
+            self:beginAutoTune()
+            self:cutPropsSoft()
+            self:setUniformSpeed(self.tune_speed or 0)
+            self:applyOutputs()
+            return self.outputs
+        end
+    end
+
     if self.mode == Flight.MODE_HOVER then
         self:updateHover(dt)
     elseif self.mode == Flight.MODE_CRUISE then
@@ -357,15 +525,32 @@ function Flight:update()
     self:updateAutoLand(dt)
 
     if self.landed and not self.auto_land then
-        -- fully reduced props when parked (unless pilot already commanded climb)
+        -- idle on ground: creep + anti-drift (unless pilot already commanded climb)
         local climbing = self.targets.altitude > self.state.altitude + 0.5
         if not climbing then
-            self:cutPropsSoft()
+            self:updateLandedIdle(dt)
         end
     end
 
     self:applyOutputs()
     return self.outputs
+end
+
+-- Parked: uniform creep speed (slow-down wire 14). No tilt, no leveling.
+function Flight:updateLandedIdle(dt)
+    local limits = self.config.limits or {}
+    local creep = limits.landed_creep or 1
+
+    self.pid.altitude:reset()
+    self:setUniformSpeed(creep)
+    self.outputs.FL_tilt = 0
+    self.outputs.FR_tilt = 0
+    self.outputs.RL_tilt = 0
+    self.outputs.RR_tilt = 0
+    self.outputs.tilt_fwd = 0
+    self.outputs.tilt_bwd = 0
+    self.outputs.rear_fw = 0
+    self.outputs.rear_bw = 0
 end
 
 function Flight:updateAutoLand(dt)
@@ -379,13 +564,17 @@ function Flight:updateAutoLand(dt)
     if self.land_state == Flight.LAND_ARMED then
         self.gear_down = true
         self.hw.setGear(true)
-        if self.proximity >= (self.config.proximity.landed_threshold or 15) then
+        local armed_ready = (not self:hasFeature("gear"))
+            or (not self.gear_settle or self.gear_settle <= 0)
+        local armed_land_thr = (self.config.proximity or {}).landed_threshold or 15
+        if armed_ready and self.proximity >= armed_land_thr then
             self.land_state = Flight.LAND_TOUCH
-        else
+        elseif armed_ready then
             self.land_state = Flight.LAND_DESCEND
             -- start slightly above current and walk target down
             self.targets.altitude = self.state.altitude
         end
+        -- else: gear still settling, stay ARMED until it finishes
     end
 
     if self.land_state == Flight.LAND_DESCEND then
@@ -415,6 +604,10 @@ end
 
 function Flight:cutPropsSoft()
     self.outputs.speed = 0
+    self.outputs.FL_speed = 0
+    self.outputs.FR_speed = 0
+    self.outputs.RL_speed = 0
+    self.outputs.RR_speed = 0
     self.outputs.FL_tilt = 0
     self.outputs.FR_tilt = 0
     self.outputs.RL_tilt = 0
@@ -423,142 +616,139 @@ function Flight:cutPropsSoft()
     self.outputs.rear_bw = 0
 end
 
+function Flight:setUniformSpeed(v)
+    v = clamp(v or 0, 0, 15)
+    self.outputs.speed = v
+    self.outputs.FL_speed = v
+    self.outputs.FR_speed = v
+    self.outputs.RL_speed = v
+    self.outputs.RR_speed = v
+end
+
 function Flight:updateHover(dt)
     local state = self.state
     local targets = self.targets
     local limits = self.config.limits
     local tilt_max = limits.tilt_max or 12
+    local hover = limits.hover_throttle or 6
+    local hmin = limits.hover_min_speed or 0
+    local hmax = limits.hover_max_speed or 15
+
+    -- Parked: update() applies creep via updateLandedIdle
+    if self.landed and not self.auto_land
+        and not (targets.altitude > state.altitude + 0.5) then
+        return
+    end
 
     -- Sticks as -1..1
     local fwd = 0
     if targets.move_forward > 0 then fwd = 1
     elseif targets.move_forward < 0 then fwd = -1 end
 
+    local can_strafe = self:hasFeature("strafe")
     local lat = 0
-    if targets.move_right > 0 then lat = 1
-    elseif targets.move_right < 0 then lat = -1 end
+    if can_strafe then
+        if targets.move_right > 0 then lat = 1
+        elseif targets.move_right < 0 then lat = -1 end
+    else
+        targets.move_right = 0
+    end
 
     local yaw_stick = targets.yaw_cmd or 0
 
-    -- Direct mixes (precision control from pilot sticks)
-    -- W/S: all props tilt together (collective pitch of thrust)
-    local collective = fwd * tilt_max
-
-    -- A/D strafe: bank via roll mix
+    -- Tilt is direct piloting only (W/S collective, Q/E yaw, A/D if strafe).
+    -- Sign flipped: W (forward) was pushing the ship backward.
+    local collective = -fwd * tilt_max
     local strafe_tilt = lat * tilt_max
 
-    -- Pitch/roll: track small attitude targets while stick held; level when idle
-    local pitch_t = (fwd ~= 0) and (fwd * 4) or 0
-    local roll_t = (lat ~= 0) and (lat * 4) or 0
+    local yaw_tilt = self:rotationControl(dt, yaw_stick, tilt_max)
 
-    local pitch_auth = 1 - math.min(1, math.abs(fwd))
-    local roll_auth = 1 - math.min(1, math.abs(lat))
+    local FL_tilt = clamp(collective + yaw_tilt + strafe_tilt, -tilt_max, tilt_max)
+    local FR_tilt = clamp(collective - yaw_tilt - strafe_tilt, -tilt_max, tilt_max)
+    local RL_tilt = clamp(collective + yaw_tilt - strafe_tilt, -tilt_max, tilt_max)
+    local RR_tilt = clamp(collective - yaw_tilt + strafe_tilt, -tilt_max, tilt_max)
 
-    local pitch_out = self.pid.pitch:update(pitch_t, state.pitch, dt)
-    local roll_out = self.pid.roll:update(roll_t, state.roll, dt)
-
-    -- Gyro damp on pitch/roll when pilot is not commanding that axis
-    local av = state.angularVelocity or {}
-    local pitch_rate = av.x or 0
-    local roll_rate = av.y or 0
-    if math.abs(pitch_rate) <= (2 * math.pi + 0.75) then pitch_rate = math.deg(pitch_rate) end
-    if math.abs(roll_rate) <= (2 * math.pi + 0.75) then roll_rate = math.deg(roll_rate) end
-    -- roll rate around forward axis is typically z for ship frame; use both y/z blend
-    local roll_rate_use = av.z or roll_rate
-    if math.abs(av.z or 0) <= (2 * math.pi + 0.75) and av.z then roll_rate_use = math.deg(av.z) end
-
-    local pitch_corr = (pitch_out - 0.15 * pitch_rate) * pitch_auth
-    local roll_corr = (roll_out - 0.15 * roll_rate_use) * roll_auth
-
-    -- Rotation stability (wrapped heading hold + rate damp)
-    local yaw_tilt, rear_cmd = self:rotationControl(dt, yaw_stick, tilt_max)
-
-    -- Prop tilt mix (BL/BR = rear props RL/RR)
-    -- Q (stick=-1): FL-,FR+,RL-,RR+   E (stick=+1): opposite
-    -- D(right): FL+,FR-,RL-,RR+        A(left): opposite
-    local FL = collective + yaw_tilt + strafe_tilt + pitch_corr + roll_corr
-    local FR = collective - yaw_tilt - strafe_tilt + pitch_corr - roll_corr
-    local RL = collective + yaw_tilt - strafe_tilt - pitch_corr + roll_corr
-    local RR = collective - yaw_tilt + strafe_tilt - pitch_corr - roll_corr
-
-    FL = clamp(FL, -tilt_max, tilt_max)
-    FR = clamp(FR, -tilt_max, tilt_max)
-    RL = clamp(RL, -tilt_max, tilt_max)
-    RR = clamp(RR, -tilt_max, tilt_max)
-
-    -- Altitude PID -> prop speed (0 when landed and not climbing)
-    local alt_output = self.pid.altitude:update(targets.altitude, state.altitude, dt)
+    -- Altitude only: uniform prop speed (no attitude speed control).
+    -- D uses climb rate (measurement) so altitude steps do not kick.
+    local alt_output = self.pid.altitude:update(targets.altitude, state.altitude, dt, state.climb_rate)
     local base_speed = 0
+    local flying = false
+
     if not self.landed then
-        base_speed = clamp(alt_output, 0, 15)
-        if base_speed < 2 and not self.auto_land then
-            base_speed = 2
-        end
+        base_speed = clamp(hover + alt_output, hmin, hmax)
+        flying = true
+    elseif targets.altitude > state.altitude + 0.5 then
+        base_speed = clamp(hover + alt_output, hmin, hmax)
+        flying = true
     else
-        if targets.altitude > state.altitude + 0.5 then
-            base_speed = clamp(alt_output, 0, 15)
-        else
-            base_speed = 0
-            FL, FR, RL, RR = 0, 0, 0, 0
-            self.pid.altitude:reset()
-        end
+        base_speed = 0
+        FL_tilt, FR_tilt, RL_tilt, RR_tilt = 0, 0, 0, 0
+        self.pid.altitude:reset()
     end
 
-    if self.auto_land and self.land_state == Flight.LAND_DESCEND then
-        base_speed = clamp(3 + alt_output * 0.3, 0, 6)
+    if not flying then
+        base_speed = 0
     end
 
-    self.outputs.speed = base_speed
-    self.outputs.FL_tilt = FL
-    self.outputs.FR_tilt = FR
-    self.outputs.RL_tilt = RL
-    self.outputs.RR_tilt = RR
+    -- LAND_DESCEND uses the same hover+PID law as normal flight: the walking
+    -- altitude target alone produces the descent command. (A reduced
+    -- feedforward here made the ship free-fall below the path.)
+    self:setUniformSpeed(base_speed)
+    self.outputs.FL_tilt = FL_tilt
+    self.outputs.FR_tilt = FR_tilt
+    self.outputs.RL_tilt = RL_tilt
+    self.outputs.RR_tilt = RR_tilt
     self.outputs.tilt_fwd = math.max(0, collective)
     self.outputs.tilt_bwd = math.max(0, -collective)
 
-    -- Rear thrusters follow the same signed rotation command (no fight)
-    if self.landed then
-        self.outputs.rear_fw = 0
-        self.outputs.rear_bw = 0
-    elseif rear_cmd > 0.02 then
-        self.outputs.rear_fw = clamp(rear_cmd * 8, 0, 8)
-        self.outputs.rear_bw = 0
-    elseif rear_cmd < -0.02 then
-        self.outputs.rear_fw = 0
-        self.outputs.rear_bw = clamp(-rear_cmd * 8, 0, 8)
-    else
-        self.outputs.rear_fw = 0
-        self.outputs.rear_bw = 0
-    end
+    -- Hover: rear thrusters always off (cruise only)
+    self.outputs.rear_fw = 0
+    self.outputs.rear_bw = 0
 end
 
 function Flight:updateCruise(dt)
     local state = self.state
     local targets = self.targets
-    local limits = self.config.limits
+    local limits = self.config.limits or {}
     local tilt_max = limits.tilt_max or 12
     local yaw_stick = targets.yaw_cmd or 0
+    local hover = limits.hover_throttle or 6
+    local hmin = limits.hover_min_speed or 0
+    local hmax = limits.hover_max_speed or 15
+
+    if self.landed and not self.auto_land
+        and not (targets.altitude > state.altitude + 0.5) then
+        return
+    end
 
     if not self.heading_valid then
         self:captureHeading()
     end
 
-    -- Same rotation stabilizer as hover; rear thrusters provide cruise thrust + yaw assist
+    -- Rear differential gives yaw assist (prop tilt not used for heading hold)
     local _, rear_cmd = self:rotationControl(dt, yaw_stick, tilt_max)
 
-    local alt_output = self.pid.altitude:update(targets.altitude, state.altitude, dt)
+    local alt_output = self.pid.altitude:update(targets.altitude, state.altitude, dt, state.climb_rate)
 
     local base_speed = 0
+    local flying = false
     if not self.landed then
-        base_speed = clamp(8 + alt_output, 0, 15)
+        base_speed = clamp(hover + alt_output, hmin, hmax)
+        flying = true
     elseif targets.altitude > state.altitude + 0.5 then
-        base_speed = clamp(alt_output, 0, 15)
+        base_speed = clamp(hover + alt_output, hmin, hmax)
+        flying = true
     else
         base_speed = 0
         self.pid.altitude:reset()
     end
 
-    self.outputs.speed = base_speed
+    if not flying then
+        base_speed = 0
+    end
+
+    self:setUniformSpeed(base_speed)
+
     self.outputs.FL_tilt = 0
     self.outputs.FR_tilt = 0
     self.outputs.RL_tilt = 0
@@ -572,10 +762,27 @@ function Flight:updateCruise(dt)
         return
     end
 
-    local rear_base = limits.cruise_rear or 12
-    -- rear_cmd -1..1 adds differential thrust on top of cruise base
-    local fw = clamp(rear_base + rear_cmd * 6, 0, 15)
-    local bw = clamp(rear_base - rear_cmd * 6, 0, 15)
+    -- Horizontal speed PID toward targets.speed. Inside the deadband keep
+    -- the last thrust that held the speed (nil = never computed yet →
+    -- run the PID once to seed it; do not substitute a fixed base thrust,
+    -- which caused a 0↔rear_base limit cycle).
+    local sdb = limits.cruise_speed_deadband or 1.5
+    local serr = (targets.speed or 0) - state.speed
+    local rear_thrust
+    if math.abs(serr) < sdb then
+        rear_thrust = self.cruise_rear_hold
+        if rear_thrust == nil then
+            rear_thrust = clamp(self.pid.speed:update(targets.speed, state.speed, dt), 0, 15)
+            self.cruise_rear_hold = rear_thrust
+        end
+    else
+        rear_thrust = clamp(self.pid.speed:update(targets.speed, state.speed, dt), 0, 15)
+        self.cruise_rear_hold = rear_thrust
+    end
+
+    -- rear_cmd -1..1 adds differential thrust on top of speed-hold thrust
+    local fw = clamp(rear_thrust + rear_cmd * 6, 0, 15)
+    local bw = clamp(rear_thrust - rear_cmd * 6, 0, 15)
     self.outputs.rear_fw = fw
     self.outputs.rear_bw = bw
 end
@@ -583,7 +790,10 @@ end
 function Flight:applyOutputs()
     local hw = self.hw
 
-    hw.setAllSpeed(self.outputs.speed)
+    hw.setPropellerOutput("FL", "speed", self.outputs.FL_speed or self.outputs.speed or 0)
+    hw.setPropellerOutput("FR", "speed", self.outputs.FR_speed or self.outputs.speed or 0)
+    hw.setPropellerOutput("RL", "speed", self.outputs.RL_speed or self.outputs.speed or 0)
+    hw.setPropellerOutput("RR", "speed", self.outputs.RR_speed or self.outputs.speed or 0)
 
     hw.setPropellerOutput("FL", "tilt_fwd", math.max(0, self.outputs.FL_tilt))
     hw.setPropellerOutput("FL", "tilt_bwd", math.max(0, -self.outputs.FL_tilt))
@@ -606,19 +816,72 @@ function Flight:emergencyStop()
     self.land_state = Flight.LAND_IDLE
     self.heading_valid = false
     self.targets.yaw_cmd = 0
+    self.targets.speed = 0 -- do not retain a cruise speed target across e-stop
+    self.estop = true
+    self.tune_pending = false
+    self.tune_requested = false
+    if self.tuning then
+        self:finishAutoTune(false, "e-stop")
+    end
     self.hw.cutAllOutputs()
-    self.outputs = {
-        speed = 0, tilt_fwd = 0, tilt_bwd = 0,
-        FL_tilt = 0, FR_tilt = 0, RL_tilt = 0, RR_tilt = 0,
-        rear_fw = 0, rear_bw = 0,
-    }
+    self:cutPropsSoft()
     for _, pid in pairs(self.pid) do
         pid:reset()
     end
 end
 
 function Flight:requestAutoTune()
+    if self.estop then
+        self.tune_status = "e-stop active"
+        return false, self.tune_status
+    end
+    if self.tuning then
+        self.tune_status = "already tuning"
+        return false, self.tune_status
+    end
+    if self.landed or self.mode ~= Flight.MODE_HOVER then
+        -- wait until airborne HOVER (boot while grounded / wrong mode)
+        self.tune_pending = true
+        self.tune_requested = false
+        self.tune_status = "waiting for air"
+        return true, self.tune_status
+    end
+    self.tune_pending = false
     self.tune_requested = true
+    self.tune_status = "queued"
+    return true, "queued"
+end
+
+function Flight:beginAutoTune()
+    local pid = self.pid.altitude
+    pid:startAutoTune(
+        function()
+            -- live target: reads targets.altitude each tick (adjustAltitude
+            -- is blocked while tuning, but auto-land also walks the target)
+            return self.targets.altitude - self.state.altitude
+        end,
+        function(out)
+            -- bang-bang altitude drive: map ±output_limit to 0..15 speed
+            self.tune_speed = math.max(0, math.min(15, 7.5 + (out / pid.output_limit) * 7.5))
+        end
+    )
+    self.tuning = true
+    self.tune_requested = false
+    self.tune_pending = false
+    self.tune_status = "running"
+end
+
+function Flight:finishAutoTune(ok, msg)
+    self.tuning = false
+    self.tune_requested = false
+    self.tune_pending = false
+    self.tune_speed = 0
+    self.tune_status = msg or (ok and "done" or "failed")
+    self.pid.altitude:reset()
+    if self.onTuneComplete then
+        pcall(self.onTuneComplete, ok)
+    end
+    return ok, self.tune_status
 end
 
 function Flight:getStatus()
@@ -641,6 +904,9 @@ function Flight:getStatus()
         land_state = self.land_state,
         proximity = self.proximity,
         sable_error = self.last_sable_error,
+        tuning = self.tuning,
+        tune_status = self.tune_status,
+        estop = self.estop,
         pid_gains = {
             altitude = self.pid.altitude:getGains(),
             pitch = self.pid.pitch:getGains(),

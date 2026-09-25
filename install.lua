@@ -8,6 +8,7 @@ local BASE_URL = "https://raw.githubusercontent.com/Artmoby7674/aeronautics_ship
 
 local files = {
     "startup",
+    "ship.lua",
     "config/atlas.lua",
     "lib/pid.lua",
     "lib/hardware.lua",
@@ -16,6 +17,7 @@ local files = {
     "lib/hud.lua",
     "lib/gfx.lua",
     "lib/font.lua",
+    "mkconfig.lua",
 }
 
 print("=============================")

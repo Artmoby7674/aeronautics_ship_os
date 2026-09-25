@@ -73,6 +73,44 @@ function Hardware.getDevice(key)
     return devices[key]
 end
 
+function Hardware.hasFeature(name)
+    if not config or not config.features then return true end
+    local v = config.features[name]
+    if v == nil then return true end
+    return not not v
+end
+
+local function engineCfg()
+    return config and config.engine or nil
+end
+
+function Hardware.setEngineStarter(active)
+    local e = engineCfg()
+    if not e or not Hardware.hasFeature("engine_auto_start") then return false end
+    local relay = devices[e.relay_key or "engine_relay"]
+    if not relay then return false end
+    local value = active and (e.active or 15) or (e.inactive or 0)
+    return pcall(function()
+        relay.setAnalogOutput(e.start_side or "left", value)
+    end)
+end
+
+function Hardware.setClutch(engaged)
+    local e = engineCfg()
+    if not e or not Hardware.hasFeature("clutch") then return false end
+    local relay = devices[e.relay_key or "engine_relay"]
+    if not relay then return false end
+    local value = engaged and (e.active or 15) or (e.inactive or 0)
+    return pcall(function()
+        relay.setAnalogOutput(e.clutch_side or "right", value)
+    end)
+end
+
+function Hardware.engineOutputsOff()
+    Hardware.setEngineStarter(false)
+    Hardware.setClutch(false)
+end
+
 function Hardware.readInputs()
     local keys = {}
     for relayKey, sides in pairs(config.input_map or {}) do
@@ -130,6 +168,12 @@ function Hardware.setPropellerOutput(prop, side, value)
 
     value = math.max(0, math.min(15, math.floor(value + 0.5)))
 
+    -- Slow-downer: engine is always ~256 RPM; higher redstone = more braking.
+    -- Flight layer uses thrust 0..15 (0 = stopped). Invert at the wire.
+    if side == "speed" then
+        value = 15 - value
+    end
+
     local success = pcall(function()
         relay.setAnalogOutput(relaySide, value)
     end)
@@ -163,12 +207,15 @@ function Hardware.cutAllOutputs()
             pcall(function()
                 if mapping.tilt_fwd then relay.setAnalogOutput(mapping.tilt_fwd, 0) end
                 if mapping.tilt_bwd then relay.setAnalogOutput(mapping.tilt_bwd, 0) end
-                if mapping.speed    then relay.setAnalogOutput(mapping.speed, 0) end
+                -- Speed is inverted slow-down: 15 = fully braked / props stopped
+                if mapping.speed    then relay.setAnalogOutput(mapping.speed, 15) end
                 if mapping.fw       then relay.setAnalogOutput(mapping.fw, 0) end
                 if mapping.bw       then relay.setAnalogOutput(mapping.bw, 0) end
             end)
         end
     end
+    -- Propulsion safety: never leave starter high from a cut
+    Hardware.setEngineStarter(false)
 end
 
 function Hardware.setAllSpeed(value)
@@ -187,6 +234,55 @@ function Hardware.setAllTilt(value)
             Hardware.setPropellerOutput(prop, "tilt_bwd", math.abs(value))
         end
     end
+end
+
+-- Body frame (Create/Sable): +X east, +Y up, +Z south.
+-- Pitch about X, roll about Z, yaw about Y (YXZ / Advanced-Math toEuler).
+-- toEuler returns (roll, yaw, pitch) — not (pitch, yaw, roll).
+-- Output convention: pitch + = nose down, roll + = right down (MC-style).
+local function quatAttitude(q)
+    if type(q) ~= "table" then
+        return 0, 0, 0
+    end
+
+    if type(q.toEuler) == "function" then
+        local ok, r, y, p = pcall(q.toEuler, q)
+        if ok and type(p) == "number" and type(y) == "number" and type(r) == "number" then
+            local norm = math.sqrt(p * p + y * y + r * r)
+            if norm ~= norm or norm == math.huge then
+                return 0, 0, 0
+            end
+            return -math.deg(p), -math.deg(r), math.deg(y)
+        end
+    end
+
+    local x, y, z, w
+    if type(q.v) == "table" and q.a ~= nil then
+        x, y, z, w = q.v.x, q.v.y, q.v.z, q.a
+    else
+        x, y, z, w = q.x, q.y, q.z, q.w
+    end
+    if type(x) ~= "number" or type(y) ~= "number"
+        or type(z) ~= "number" or type(w) ~= "number" then
+        return 0, 0, 0
+    end
+
+    local singularity = 2 * (y * z - x * w)
+    local pitch, yaw, roll
+    if singularity > 0.9999 then
+        pitch = -math.pi / 2
+        yaw = math.atan2(-2 * (x * y - z * w), 2 * (w * w + x * x) - 1)
+        roll = 0
+    elseif singularity < -0.9999 then
+        pitch = math.pi / 2
+        yaw = -math.atan2(-2 * (x * y - z * w), 2 * (w * w + x * x) - 1)
+        roll = 0
+    else
+        pitch = math.asin(-singularity)
+        yaw = math.atan2(2 * (x * z + y * w), 2 * (w * w + z * z) - 1)
+        roll = math.atan2(2 * (x * y + z * w), 2 * (w * w + y * y) - 1)
+    end
+    return math.deg(pitch), math.deg(roll), math.deg(yaw)
 end
 
 function Hardware.getShipState()
@@ -211,13 +307,10 @@ function Hardware.getShipState()
         end
 
         if pose and pose.orientation then
-            local q = pose.orientation
-            state.pitch = math.deg(math.atan2(2 * (q.w * q.x + q.y * q.z),
-                1 - 2 * (q.x * q.x + q.y * q.y)))
-            state.roll = math.deg(math.asin(math.max(-1, math.min(1,
-                2 * (q.w * q.y - q.z * q.x)))))
-            state.yaw = math.deg(math.atan2(2 * (q.w * q.z + q.x * q.y),
-                1 - 2 * (q.y * q.y + q.z * q.z)))
+            local pitch, roll, yaw = quatAttitude(pose.orientation)
+            state.pitch = pitch
+            state.roll = roll
+            state.yaw = yaw
         end
 
         local vel = sublevel.getLinearVelocity()
@@ -229,7 +322,7 @@ function Hardware.getShipState()
 
         local angVel = sublevel.getAngularVelocity()
         if angVel then
-            state.angularVelocity = { x = angVel.x, y = angVel.y, z = angVel.z }
+            state.angularVelocity = { x = angVel.x or 0, y = angVel.y or 0, z = angVel.z or 0 }
         end
 
         state.mass = sublevel.getMass() or 0
