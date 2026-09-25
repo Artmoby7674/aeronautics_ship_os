@@ -220,7 +220,7 @@ function OS.start(cfg, hardware)
     if hasFeature("auto_tune") then ctrl = ctrl .. " tune" end
     ctrl = ctrl .. " mode  e-stop  reset  tabs"
     print(ctrl)
-    print("  Red circle (top-left, when GND) - shutdown (decouples clutch)")
+    print("  Red circle (top-left) - shutdown (decouples clutch)")
     print("")
 
     local controlTimer = os.startTimer(0.05)
@@ -527,9 +527,8 @@ end
 function OS.powerOff()
     if power_state ~= "on" then return false, "NOT ON" end
     if not flight then return false, "NO FLIGHT" end
-    if not flight.landed then
-        return false, "MUST BE ON GROUND"
-    end
+    -- allowed in the air too (pilot may need an emergency power-down);
+    -- emergencyStop cuts all outputs, so the ship will drop
     flight:emergencyStop()
     hw.cutAllOutputs()
     -- Decouple clutch on deliberate shutdown only (grounded power button)

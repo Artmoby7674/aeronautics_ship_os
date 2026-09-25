@@ -59,7 +59,7 @@ Loading bar = **5s** (config `engine.boot_seconds`):
 | 4s | **Clutch** couples (relay **right**), stays on while OS is on |
 | 5s | Flight HUD ready |
 
-**Shutdown** (red/gray circle, only when grounded): decouples clutch (right→0), cuts props, returns to splash. Clutch is **not** dropped in the air — you cannot power off until touchdown.
+**Shutdown** (circle, top-left): allowed landed or airborne — decouples clutch (right→0), cuts all outputs (e-stop), returns to splash. In the air the ship loses all thrust, so expect it to drop.
 
 `fuel_level` feature + `fuel` config block are reserved for a future fuel-container readout (not wired yet).
 

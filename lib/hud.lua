@@ -157,21 +157,20 @@ local function drawCircle(cx, cy, r, color)
     end
 end
 
-local function drawShutdownButton(landed)
+local function drawShutdownButton()
     if not shutdown_rect then return end
     local r = shutdown_rect
     local cx = r.x + math.floor(r.w / 2)
     local cy = r.y + math.floor(r.h / 2)
     local rad = math.floor(r.d / 2) - 1
-    local col = landed and C.power_on or C.power_off
+    -- always active: shutdown is allowed landed or airborne
+    local col = C.power_on
     -- dark ring
     drawCircle(cx, cy, rad + 1, 15)
     drawCircle(cx, cy, rad, col)
-    if landed then
-        -- inner highlight
-        drawCircle(cx, cy, math.max(1, rad - 3), 0)
-        drawCircle(cx, cy, math.max(1, rad - 4), col)
-    end
+    -- inner highlight
+    drawCircle(cx, cy, math.max(1, rad - 3), 0)
+    drawCircle(cx, cy, math.max(1, rad - 4), col)
 end
 
 -- ============================================================
@@ -608,7 +607,7 @@ local function drawDynamic(s, status_msg)
     local x = L.content_x
     local y = L.border + 6
 
-    drawShutdownButton(not not s.landed)
+    drawShutdownButton()
 
     local hdr = status_msg or ""
     if hdr == "" then hdr = s.mode or "" end
