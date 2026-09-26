@@ -169,7 +169,7 @@ local FALLBACK_TEMPLATE = [[return {
         engine_auto_start = false,
         clutch = false,
         fuel_level = false,
-        strafe = false, -- set true only if the ship has lateral thrusters
+        rear_reverse = true,
     },
     engine = {
         relay_key = "engine_relay",
@@ -197,6 +197,7 @@ local FALLBACK_TEMPLATE = [[return {
         input_1 = { W = "front", S = "back", A = "left", D = "right" },
         input_2 = { Q = "left", E = "right", SPACE = "front", CTRL = "back" },
         aux_relay = { SHIFT = "left", PROX = "back" },
+        engine_relay = { UP = "front", DOWN = "back" },
     },
     gear_output = { relay = "aux_relay", side = "front", deploy = 15, retract = 0 },
     proximity = { input_key = "aux_relay", side = "back", landed_threshold = 15, gear_deploy_threshold = 1, max_blocks = 15, gear_settle_ticks = 20 },
@@ -205,7 +206,7 @@ local FALLBACK_TEMPLATE = [[return {
         FR   = { relay = "output_FR", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
         RL   = { relay = "output_RL", tilt_fwd = "front", tilt_bwd = "back", speed = "left" },
         RR   = { relay = "output_RR", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
-        REAR = { relay = "output_REAR", fw = "front", bw = "back" },
+        REAR = { relay = "output_REAR", fw = "front", bw = "back", rev = "top" },
     },
     propellers = {
         FL = { x = -3, y = 0, z = 3 },
@@ -218,7 +219,7 @@ local FALLBACK_TEMPLATE = [[return {
         max_tilt = 15, max_climb_rate = 10, max_descent_rate = 5,
         hover_speed = 2, tilt_max = 12, hover_min_speed = 0, hover_max_speed = 15,
         hover_throttle = 6,
-        land_descent_rate = 0.8,
+        land_descent_rate = 12.0,
         alt_step = 5,
         cruise_rear = 12,
         cruise_ramp = 8,
@@ -505,7 +506,7 @@ local peripheral_desc = {
     input_1 = "Typewriter relay for WASD keys",
     input_2 = "Typewriter relay for Q/E/Space/Ctrl",
     aux_relay = "Aux relay: shift / gear / proximity",
-    engine_relay = "Engine relay: LEFT=start, RIGHT=clutch",
+    engine_relay = "Engine relay: LEFT=start, RIGHT=clutch; front/back=tab up/down",
     output_FL = "Front-left propeller relay",
     output_FR = "Front-right propeller relay",
     output_RL = "Rear-left propeller relay",

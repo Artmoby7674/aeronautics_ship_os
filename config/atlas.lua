@@ -17,7 +17,7 @@ return {
         engine_auto_start = true, -- boot sequence: starter pulse + clutch
         clutch = true,
         fuel_level = false,       -- reserved: fuel container item count later
-        strafe = false,           -- Atlas has no lateral thrusters; set true on ships that do
+        rear_reverse = true,      -- REAR relay reverse face (auto-land fore/aft hold)
     },
 
     -- Engine start + clutch (one relay, two faces)
@@ -76,6 +76,10 @@ return {
             SHIFT = "left",
             PROX = "back",
         },
+        engine_relay = {
+            UP = "front",
+            DOWN = "back",
+        },
     },
 
     gear_output = {
@@ -102,7 +106,7 @@ return {
         FR   = { relay = "output_FR", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
         RL   = { relay = "output_RL", tilt_fwd = "front", tilt_bwd = "back", speed = "left" },
         RR   = { relay = "output_RR", tilt_fwd = "front", tilt_bwd = "back", speed = "right" },
-        REAR = { relay = "output_REAR", fw = "front", bw = "back" },
+        REAR = { relay = "output_REAR", fw = "front", bw = "back", rev = "top" },
     },
 
     propellers = {
@@ -133,7 +137,7 @@ return {
         -- Thrust that cancels m*g at rest (feedforward). Must be accurate or
         -- the integral has to make up the difference (slow drift then overshoot).
         hover_throttle = 6,
-        land_descent_rate = 0.8,
+        land_descent_rate = 12.0,
         alt_step = 5,
         cruise_rear = 12,
         cruise_ramp = 8,             -- speed units/s while W/S held in cruise

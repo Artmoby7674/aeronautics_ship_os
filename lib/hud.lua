@@ -57,6 +57,7 @@ local active_tab = "flight"
 local initialized = false
 local chrome_dirty = true
 local content_dirty = true
+local unflip_shown = false -- last seen status.unflip (drives full redraw)
 local power_dirty = true
 local ship_label = "FLIGHT OS"
 local render_config = nil -- last config passed to HUD.render (features for ACTIONS)
@@ -129,6 +130,19 @@ local function drawBar(x, y, w, h, ratio, fg)
     local fill = math.floor(w * clamp(ratio or 0, 0, 1) + 0.5)
     if fill > 0 then
         Gfx.fillRect(x, y, fill, h, fg or C.good)
+    end
+end
+
+-- 15-segment level bar (rear speed level): one cut per possible speed,
+-- filled cells = current level; level 0 = all empty.
+local function drawSegments(x, y, w, h, level, cells)
+    cells = cells or 15
+    local gap = 1
+    local sw = math.floor((w - gap * (cells - 1)) / cells)
+    level = math.floor(clamp(level or 0, 0, cells) + 0.5)
+    for i = 1, cells do
+        local sx = x + (i - 1) * (sw + gap)
+        Gfx.fillRect(sx, y, sw, h, i <= level and C.good or C.bar_bg)
     end
 end
 
@@ -297,9 +311,8 @@ local function drawFlightStatic()
     Gfx.fillRect(x, y + 102, L.content_w - 16, 6, C.bar_bg)
     label(x, y + 116, "PROP SPD")
     -- per-prop thrust (0..15) from drone mixer — not tilt
-    label(x, y + 156, "REAR FW/BW")
-    Gfx.fillRect(x, y + 168, L.content_w - 16, 5, C.bar_bg)
-    Gfx.fillRect(x, y + 178, L.content_w - 16, 5, C.bar_bg)
+    label(x, y + 156, "REAR")
+    -- 15-segment rear level line drawn in dynamic (y+168)
     -- vertical altitude-target gauge track (right edge of content)
     local gx = x + L.content_w - 12
     Gfx.fillRect(gx, y, 12, 184, C.bar_bg)
@@ -320,10 +333,8 @@ local function drawEnginesStatic()
     label(x, y + 70, "RR")
     label(x, y + 90, "REAR")
     Gfx.fillRect(x, y + 100, L.content_w, 2, C.panel)
-    label(x, y + 108, "FW")
-    Gfx.fillRect(x, y + 120, L.content_w, 8, C.bar_bg)
-    label(x, y + 136, "BW")
-    Gfx.fillRect(x, y + 148, L.content_w, 8, C.bar_bg)
+    label(x, y + 108, "SPEED")
+    -- 15-segment rear level line drawn in dynamic (y+120)
     label(x, y + 164, "TOTAL")
     Gfx.fillRect(x, y + 176, L.content_w, 8, C.bar_bg)
 end
@@ -371,13 +382,10 @@ end
 
 -- ACTIONS tab: touch buttons replacing M/L/G/X/R/T/N keys
 local ACTION_BTNS = {
-    { id = "mode",  label = "MODE",     feat = "cruise_mode" },
     { id = "land",  label = "AUTO-LAND", feat = "auto_land" },
-    { id = "gear",  label = "GEAR",     feat = "gear" },
+    { id = "gear",  label = "GEAR",      feat = "gear" },
     { id = "estop", label = "E-STOP" },
-    { id = "reset", label = "RESET" },
     { id = "tune",  label = "AUTO-TUNE", feat = "auto_tune" },
-    { id = "next",  label = "NEXT TAB" },
 }
 
 local function actionBtnRect(i)
@@ -407,9 +415,6 @@ local function drawActionsDynamic(s)
         local fg = enabled and C.text or C.dim
         if btn.id == "estop" then
             bg = C.bad
-            fg = 15
-        elseif btn.id == "mode" and s.mode == "CRUISE" then
-            bg = C.warn
             fg = 15
         elseif btn.id == "land" and s.auto_land then
             bg = C.warn
@@ -483,8 +488,7 @@ local function drawFlightDynamic(s)
         slotText(x + 40, y + 128 + (i - 1) * 8, 70, string.format("%5.1f", t), tc, "right")
     end
 
-    drawBar(x, y + 168, L.content_w - 16, 5, (o.rear_fw or 0) / 15, C.good)
-    drawBar(x, y + 178, L.content_w - 16, 5, (o.rear_bw or 0) / 15, C.good)
+    drawSegments(x, y + 168, L.content_w - 16, 6, s.target_speed)
 
     -- Vertical altitude target gauge (right edge)
     local gx = x + L.content_w - 12
@@ -503,8 +507,8 @@ local function drawFlightDynamic(s)
     end
     local ty = altY(tgt)
     Gfx.fillRect(gx, ty, 12, 2, C.warn)
-    -- small target value chip above gauge
-    slotText(x + L.content_w - 60, y - 0, 44, string.format("T%.0f", tgt), C.warn, "right")
+    -- current altitude chip above gauge (target shown by the marker line)
+    slotText(x + L.content_w - 60, y - 0, 44, string.format("%.0f", cur), C.accent, "right")
 end
 
 local function drawEnginesDynamic(s)
@@ -518,8 +522,7 @@ local function drawEnginesDynamic(s)
         if spd < 1 then tc = C.bad elseif spd > 12 then tc = C.warn end
         slotText(x + 40, y + 16 + (i - 1) * 18, 80, string.format("%5.1f", spd), tc, "right")
     end
-    drawBar(x, y + 120, L.content_w, 8, (o.rear_fw or 0) / 15, C.good)
-    drawBar(x, y + 148, L.content_w, 8, (o.rear_bw or 0) / 15, C.good)
+    drawSegments(x, y + 120, L.content_w, 8, s.target_speed)
     drawBar(x, y + 176, L.content_w, 8, (o.speed or 0) / 15, C.good)
 end
 
@@ -566,26 +569,34 @@ local function drawNavDynamic(s)
     if math.abs(err) > 10 then ec = C.bad elseif math.abs(err) > 3 then ec = C.warn end
     slotText(x + 90, y + 60, vw, string.format("%+.1f", err), ec, "right")
 
-    slotText(x + 50, y + 106, vw - 50, "N/A", C.dim, "left")
-    slotText(x + 50, y + 126, vw - 50, string.format("%.1f", s.altitude or 0), C.text, "left")
-    slotText(x + 50, y + 146, vw - 50, "N/A", C.dim, "left")
+    local pos = s.position or {}
+    slotText(x + 50, y + 106, vw - 50, string.format("%.1f", pos.x or 0), C.text, "left")
+    slotText(x + 50, y + 126, vw - 50,
+        string.format("%.1f", pos.y or (s.altitude or 0)), C.text, "left")
+    slotText(x + 50, y + 146, vw - 50, string.format("%.1f", pos.z or 0), C.text, "left")
 end
 
 local function drawAlarmsDynamic(s, status_msg)
     local x = L.content_x
     local y = L.body_y + 2
     local msgs = {}
+    if s.unflip then
+        table.insert(msgs, { "AUTOMATIC UNFLIP SEQUENCE", C.bad })
+    end
     if s.estop then
         table.insert(msgs, { "E-STOP LATCHED (RESET)", C.bad })
     end
-    if status_msg and status_msg ~= "" then
+    -- status feedback ("Tab: X", "GEAR DOWN", ...) is not an alarm — this
+    -- tab is reserved for real alarms
+    if status_msg and status_msg ~= "" and status_msg:sub(1, 4) ~= "Tab:" then
         table.insert(msgs, { status_msg, C.accent })
     end
     local alt = s.altitude or 0
     if alt < 70 then
         table.insert(msgs, { "LOW ALTITUDE", C.bad })
     end
-    if (s.climb_rate or 0) < -4 then
+    -- fast descent is expected while auto-landing (6 m/s walk)
+    if (s.climb_rate or 0) < -4 and not s.auto_land then
         table.insert(msgs, { "FAST DESCENT", C.warn })
     end
     if math.abs(s.pitch or 0) > 15 or math.abs(s.roll or 0) > 15 then
@@ -645,6 +656,16 @@ local function drawDynamic(s, status_msg)
     elseif active_tab == "actions" then
         drawActionsDynamic(s)
     end
+
+    -- Auto-unflip warning: black on red, drawn last so it sits on top.
+    if s.unflip then
+        local msg = fit("AUTOMATIC UNFLIP SEQUENCE", L.content_w - 12)
+        local bw = Font.textWidth(msg) + 12
+        local bx = L.content_x + math.floor((L.content_w - bw) / 2)
+        local by = L.body_y + 4
+        Gfx.fillRect(bx, by, bw, Font.height + 6, C.bad)
+        Gfx.text(bx + 6, by + 3, msg, 0)
+    end
 end
 
 -- ============================================================
@@ -689,6 +710,14 @@ function HUD.render(mon, status, config, status_msg)
     splash_active = false
     render_config = config
     status_msg = status_msg or ""
+    -- The auto-unflip banner is a dynamic overlay drawn over static content.
+    -- Force a full redraw on start/end so stale banner pixels are cleared
+    -- (otherwise it lingers until the next tab change).
+    if (status.unflip or false) ~= unflip_shown then
+        unflip_shown = status.unflip or false
+        chrome_dirty = true
+        content_dirty = true
+    end
     Gfx.begin()
     if chrome_dirty then
         drawChrome()
@@ -721,12 +750,31 @@ function HUD.getTab()
     return active_tab
 end
 
+-- Fresh-start UI state: default tab + full redraw. Used by the stop button
+-- so the next boot matches a first-time OS start.
+function HUD.resetState()
+    active_tab = "flight"
+    chrome_dirty = true
+    content_dirty = true
+    power_dirty = true
+end
+
 function HUD.nextTab()
     for i, tab in ipairs(TABS) do
         if tab.id == active_tab then
             local nxt = TABS[(i % #TABS) + 1]
             HUD.setTab(nxt.id)
             return nxt.id
+        end
+    end
+end
+
+function HUD.prevTab()
+    for i, tab in ipairs(TABS) do
+        if tab.id == active_tab then
+            local prv = TABS[((i - 2) % #TABS) + 1]
+            HUD.setTab(prv.id)
+            return prv.id
         end
     end
 end
@@ -755,25 +803,43 @@ local function hitTest(x, y)
         end
     end
 
+    -- Tabs: pad the hit rect by one cell (same trick as the boot button) so
+    -- cell-quantized touches register reliably. The 5px gap is smaller than a
+    -- 9px cell, so unpadded top-corner samples often fell into the tab above
+    -- (a no-op when it was the active tab). Overlapping pads resolve to the
+    -- nearest tab center.
+    local best_i, best_d2 = nil, nil
     for i, tab in ipairs(TABS) do
         local tx, ty, tw, th = tabRect(i)
-        if x >= tx and x < tx + tw and y >= ty and y < ty + th then
-            if active_tab ~= tab.id then
-                HUD.setTab(tab.id)
+        if x >= tx - 6 and x < tx + tw + 6
+            and y >= ty - 9 and y < ty + th + 9 then
+            local dx = x - (tx + tw / 2)
+            local dy = y - (ty + th / 2)
+            local d2 = dx * dx + dy * dy
+            if not best_d2 or d2 < best_d2 then
+                best_i, best_d2 = i, d2
             end
-            return "tab:" .. tab.id
         end
+    end
+    if best_i then
+        local tab = TABS[best_i]
+        if active_tab ~= tab.id then
+            HUD.setTab(tab.id)
+        end
+        return "tab:" .. tab.id
     end
     return nil
 end
 
--- Sample a character cell: corners + center, so a button partially covered
--- by the cell still hits (cell 6x9 px vs 12 px shutdown circle).
+-- Sample a character cell: center first (the aim point), then corners, so a
+-- button partially covered by the cell still hits (cell 6x9 px vs 12 px
+-- shutdown circle). Center-first matters: top corners sit closer to the tab
+-- above in the 5px gap and would win the nearest-center race.
 local function hitTestCell(cx, cy)
     local x0, y0 = (cx - 1) * 6, (cy - 1) * 9
     local x1, y1 = cx * 6 - 1, cy * 9 - 1
     local mx, my = math.floor((x0 + x1) / 2), math.floor((y0 + y1) / 2)
-    local pts = { { x0, y0 }, { x1, y0 }, { x0, y1 }, { x1, y1 }, { mx, my } }
+    local pts = { { mx, my }, { x0, y0 }, { x1, y0 }, { x0, y1 }, { x1, y1 } }
     for _, p in ipairs(pts) do
         local action = hitTest(p[1], p[2])
         if action then return action end
@@ -794,9 +860,12 @@ function HUD.handleTouch(rx, ry)
 
     local cols = math.floor(Gfx.W / 6)
     local rows = math.floor(Gfx.H / 9)
-    if rx >= 1 and ry >= 1 and rx <= cols and ry <= rows then
-        -- official CC space: character cells (no raw-pixel reinterpretation,
-        -- which made e.g. cell (7,7) fall through onto the shutdown circle)
+    -- monitor_touch is cell-based; W/H are not always multiples of the cell
+    -- size, so the partial edge column/row reports cells beyond floor(W/6).
+    -- Those used to fall to the pixel path (cell number read as pixels = a
+    -- point in the content area) and never matched anything. Anything that
+    -- looks like a cell goes through the cell sampler.
+    if rx >= 1 and ry >= 1 and rx <= cols + 2 and ry <= rows + 2 then
         return hitTestCell(rx, ry)
     end
     -- out-of-grid: pixel-space event

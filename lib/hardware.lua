@@ -193,11 +193,40 @@ function Hardware.setRearOutput(direction, value)
 
     value = math.max(0, math.min(15, math.floor(value + 0.5)))
 
+    -- Same slow-down wiring as main prop "speed": higher redstone = more
+    -- braking (15 = stopped). Flight layer uses thrust 0..15 (0 = stopped).
+    -- Invert at the wire: more speed = less redstone signal.
+    value = 15 - value
+
     local success = pcall(function()
         relay.setAnalogOutput(relaySide, value)
     end)
 
     return success
+end
+
+-- REAR relay reverse face (mapping.rev, e.g. top): reverses the rear unit's
+-- thrust direction for the auto-land fore/aft hold.
+function Hardware.setRearReverse(on)
+    local mapping = (config.output_map or {}).REAR
+    if not mapping or not mapping.rev then return false end
+    local relay = devices[mapping.relay]
+    if not relay then return false end
+    local ok = pcall(function()
+        relay.setAnalogOutput(mapping.rev, on and 15 or 0)
+    end)
+    return ok
+end
+
+-- Redstone link at the left of the main computer (direct computer redstone,
+-- not a relay peripheral): reverses ALL lift propellers for the auto-unflip
+-- sequence.
+local REVERSE_SIDE = "left"
+
+function Hardware.setLiftReverse(on)
+    pcall(function()
+        redstone.setOutput(REVERSE_SIDE, on == true)
+    end)
 end
 
 function Hardware.cutAllOutputs()
@@ -209,13 +238,17 @@ function Hardware.cutAllOutputs()
                 if mapping.tilt_bwd then relay.setAnalogOutput(mapping.tilt_bwd, 0) end
                 -- Speed is inverted slow-down: 15 = fully braked / props stopped
                 if mapping.speed    then relay.setAnalogOutput(mapping.speed, 15) end
-                if mapping.fw       then relay.setAnalogOutput(mapping.fw, 0) end
-                if mapping.bw       then relay.setAnalogOutput(mapping.bw, 0) end
+                -- Rear fw/bw use the same inverted slow-down wiring (15 = stopped)
+                if mapping.fw       then relay.setAnalogOutput(mapping.fw, 15) end
+                if mapping.bw       then relay.setAnalogOutput(mapping.bw, 15) end
             end)
         end
     end
     -- Propulsion safety: never leave starter high from a cut
     Hardware.setEngineStarter(false)
+    -- Reverse links must never survive a safety cut either
+    Hardware.setLiftReverse(false)
+    Hardware.setRearReverse(false)
 end
 
 function Hardware.setAllSpeed(value)
@@ -237,8 +270,11 @@ function Hardware.setAllTilt(value)
 end
 
 -- Body frame (Create/Sable): +X east, +Y up, +Z south.
--- Pitch about X, roll about Z, yaw about Y (YXZ / Advanced-Math toEuler).
--- toEuler returns (roll, yaw, pitch) — not (pitch, yaw, roll).
+-- Ship local X = LONGITUDINAL axis (craft built pointing east); local Z = right.
+-- toEuler docs say (pitch, yaw, roll), but its YXZ decomposition against this
+-- ship's frame yields: slot1 = rotation about local X = the ship's ROLL
+-- (right-down positive), slot3 = rotation about local Z = the ship's PITCH
+-- (nose-UP positive), slot2 = yaw (turning left positive). Heading-independent.
 -- Output convention: pitch + = nose down, roll + = right down (MC-style).
 local function quatAttitude(q)
     if type(q) ~= "table" then
@@ -246,13 +282,13 @@ local function quatAttitude(q)
     end
 
     if type(q.toEuler) == "function" then
-        local ok, r, y, p = pcall(q.toEuler, q)
+        local ok, p, y, r = pcall(q.toEuler, q)
         if ok and type(p) == "number" and type(y) == "number" and type(r) == "number" then
             local norm = math.sqrt(p * p + y * y + r * r)
             if norm ~= norm or norm == math.huge then
                 return 0, 0, 0
             end
-            return -math.deg(p), -math.deg(r), math.deg(y)
+            return -math.deg(r), math.deg(p), math.deg(y)
         end
     end
 
@@ -282,7 +318,31 @@ local function quatAttitude(q)
         yaw = math.atan2(2 * (x * z + y * w), 2 * (w * w + z * z) - 1)
         roll = math.atan2(2 * (x * y + z * w), 2 * (w * w + y * y) - 1)
     end
-    return math.deg(pitch), math.deg(roll), math.deg(yaw)
+    -- Same mapping as the toEuler path above (local X = longitudinal axis).
+    return -math.deg(roll), math.deg(pitch), math.deg(yaw)
+end
+
+-- Ship nose direction in world space: local +X rotated by the orientation
+-- quaternion (same field shapes as quatAttitude). Used to project world
+-- velocity onto the fore/aft axis without yaw-convention guessing.
+local function quatForward(q)
+    if type(q) ~= "table" then return nil end
+    local x, y, z, w
+    if type(q.v) == "table" and q.a ~= nil then
+        x, y, z, w = q.v.x, q.v.y, q.v.z, q.a
+    else
+        x, y, z, w = q.x, q.y, q.z, q.w
+    end
+    if type(x) ~= "number" or type(y) ~= "number"
+        or type(z) ~= "number" or type(w) ~= "number" then
+        return nil
+    end
+    -- v' = v + 2w(u×v) + 2u×(u×v) with v = (1,0,0), u = (x,y,z)
+    return {
+        x = 1 - 2 * (y * y + z * z),
+        y = 2 * (w * z + x * y),
+        z = 2 * (x * z - w * y),
+    }
 end
 
 function Hardware.getShipState()
@@ -290,6 +350,7 @@ function Hardware.getShipState()
         position = { x = 0, y = 0, z = 0 },
         velocity = { x = 0, y = 0, z = 0 },
         angularVelocity = { x = 0, y = 0, z = 0 },
+        forward = { x = 0, y = 0, z = 0 },
         pitch = 0,
         roll = 0,
         yaw = 0,
@@ -311,6 +372,8 @@ function Hardware.getShipState()
             state.pitch = pitch
             state.roll = roll
             state.yaw = yaw
+            local fwd = quatForward(pose.orientation)
+            if fwd then state.forward = fwd end
         end
 
         local vel = sublevel.getLinearVelocity()

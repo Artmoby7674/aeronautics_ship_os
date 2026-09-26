@@ -207,12 +207,11 @@ function OS.start(cfg, hardware)
     print("")
     print("Controls (when ON):")
     print("  W/S - Tilt collective (translation)")
-    print("  A/D - Strafe via bank tilt")
     print("  Q/E - Yaw left/right")
     print("  Space/Ctrl - Altitude target +/−")
     if hasFeature("cruise_mode") then
         print("  Shift redstone - Hover <-> Cruise")
-        print("  Cruise: W/S speed goal, Space/Ctrl altitude (slight pitch)")
+        print("  Cruise: W/S rear goal bar 0-15 (step +/-1, hold repeats), Space/Ctrl altitude")
     end
     local ctrl = "  Actions (monitor ACTIONS tab):"
     if hasFeature("auto_land") then ctrl = ctrl .. " land" end
@@ -333,6 +332,29 @@ function OS.controlTick()
 
     local keys = hw.readInputs()
 
+    -- Engine relay front/back = UP/DOWN tab keys: rising edge switches the
+    -- monitor tab (each key press = one step; sides come from input_map).
+    OS._tab_edge = OS._tab_edge or { up = false, down = false }
+    local up_d = (keys.UP or 0) > 0
+    local dn_d = (keys.DOWN or 0) > 0
+    if up_d and not OS._tab_edge.up then
+        local hud = loadLib("lib.hud")
+        local id = hud.prevTab() -- tab strip is top-down: up = earlier tab
+        if id then
+            status_message = "Tab: " .. tostring(id):upper()
+            status_time = os.clock()
+        end
+    elseif dn_d and not OS._tab_edge.down then
+        local hud = loadLib("lib.hud")
+        local id = hud.nextTab() -- down = later tab
+        if id then
+            status_message = "Tab: " .. tostring(id):upper()
+            status_time = os.clock()
+        end
+    end
+    OS._tab_edge.up = up_d
+    OS._tab_edge.down = dn_d
+
     local shift = keys.SHIFT or 0
     if hasFeature("cruise_mode") and flight:pollShift(shift) then
         status_message = "Mode: " .. flight.mode
@@ -369,6 +391,18 @@ function OS.controlTick()
     flight:processInputs(keys)
     flight:update()
 
+    -- Safety shutdown requested by flight (auto-land goal runaway):
+    -- powerOff decouples the clutch (props free of the engines) and drops
+    -- the monitor back to the splash screen.
+    if flight.shutdown_request then
+        local why = flight.shutdown_request
+        flight.shutdown_request = nil
+        print("[" .. string.format("%.0f", os.clock()) ..
+            "] Safety shutdown: " .. tostring(why))
+        OS.powerOff()
+        return
+    end
+
     if flight.tune_status and flight.tune_status ~= "" then
         local ts = flight.tune_status
         if ts == "queued" or ts == "running" or ts == "waiting for air" then
@@ -387,20 +421,7 @@ end
 function OS.doAction(name)
     if power_state ~= "on" or not flight then return end
 
-    if name == "mode" then
-        if not hasFeature("cruise_mode") then
-            status_message = "No cruise mode on this ship"
-            status_time = os.clock()
-        else
-            local result = {flight:toggleMode()}
-            if result[1] then
-                status_message = "Mode: " .. result[3]
-                status_time = os.clock()
-                print("[" .. string.format("%.0f", os.clock()) .. "] Mode: " .. result[2] .. " -> " .. result[3])
-            end
-        end
-
-    elseif name == "estop" then
+    if name == "estop" then
         flight:emergencyStop()
         status_message = "EMERGENCY STOP"
         status_time = os.clock()
@@ -446,23 +467,6 @@ function OS.doAction(name)
             status_message = ok and "Auto-tuning altitude PID..." or ("Auto-tune: " .. tostring(msg))
             status_time = os.clock()
         end
-
-    elseif name == "reset" then
-        local state = hw.getShipState()
-        flight.estop = false
-        flight.targets.altitude = state.altitude
-        flight:captureHeading()
-        flight.targets.move_forward = 0
-        flight.targets.move_right = 0
-        flight.targets.yaw_cmd = 0
-        status_message = "Targets reset"
-        status_time = os.clock()
-
-    elseif name == "next" then
-        local hud = loadLib("lib.hud")
-        local nxt = hud.nextTab()
-        status_message = "Tab: " .. (nxt or hud.getTab()):upper()
-        status_time = os.clock()
     end
 end
 
@@ -540,8 +544,12 @@ function OS.powerOff()
     hw.setEngineStarter(false)
     OS._starter_on = false
     power_state = "off"
+    -- Session state back to a first-time OS start: HOVER mode, default tab,
+    -- no stale status. (beginBoot still clears the e-stop latch and re-arms
+    -- auto-tune on the next boot.) Next screen is the boot splash.
+    flight:setMode(Flight.MODE_HOVER)
     local hud = loadLib("lib.hud")
-    hud.markChromeDirty()
+    hud.resetState()
     status_message = ""
     print("[" .. string.format("%.0f", os.clock()) .. "] Shutdown -> splash")
     return true, "OFF"
@@ -560,11 +568,12 @@ function OS.handleMonitorTouch(x, y)
         -- ignore
     elseif action == "shutdown" then
         local ok, msg = OS.powerOff()
-        status_message = msg or (ok and "OFF" or "SHUTDOWN BLOCKED")
-        status_time = os.clock()
         if not ok then
+            status_message = msg or "SHUTDOWN BLOCKED"
+            status_time = os.clock()
             print("[" .. string.format("%.0f", os.clock()) .. "] Shutdown blocked: " .. tostring(msg))
         end
+        -- success: powerOff already cleared status (fresh-start splash state)
     elseif action:sub(1, 4) == "act:" then
         OS.doAction(action:sub(5))
     elseif action ~= "boot" then
